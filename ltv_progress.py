@@ -39,6 +39,49 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ──────────────────────────────────────────────
+# パスワード認証
+# ──────────────────────────────────────────────
+def check_password():
+    try:
+        correct_password = st.secrets["password"]
+    except Exception:
+        return True  # secrets未設定（ローカル環境）はスルー
+
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.markdown("""
+    <div style="
+        max-width:400px; margin:80px auto; padding:2rem;
+        background:#fff; border-radius:12px;
+        box-shadow:0 4px 20px rgba(0,0,0,0.1);
+        text-align:center;
+    ">
+        <div style="font-size:3rem;">📈</div>
+        <h2 style="color:#1a237e; margin:0.5rem 0;">生涯顧客LTV進捗管理</h2>
+        <p style="color:#666; font-size:0.9rem;">株式会社オートウェーブ</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.form("login_form"):
+        st.markdown("<div style='max-width:400px;margin:0 auto;'>", unsafe_allow_html=True)
+        password = st.text_input("パスワード", type="password", placeholder="パスワードを入力してください")
+        submitted = st.form_submit_button("ログイン", use_container_width=True, type="primary")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if submitted:
+            if password == correct_password:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("パスワードが違います。")
+
+    return False
+
+if not check_password():
+    st.stop()
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap');
