@@ -1745,128 +1745,132 @@ with tab0:
                     st.markdown(f"**未取引サービス：** {row.get('未取引サービス','─')}")
                     st.markdown(f"**接客指示：** {row.get('接客指示','通常対応')}")
 
-                # ── 活動記録ボタン ──
+                # ── 活動記録（st.form化でリロード完全抑止）──
                 act_key = f"act_{veh_id_str}_{_}"
+                saved_key = f"saved_{act_key}"
+
                 with st.expander("📝 活動記録", expanded=False):
-                    staff_list_card = load_staff_master()
-
-                    # フルナンバー入力（登録番号が不完全な場合）
-                    reg_no_display = str(row.get("登録番号", "")).strip()
-                    is_incomplete = len(reg_no_display.replace(" ","")) < 6
-                    if is_incomplete:
-                        st.warning("⚠️ 登録番号が不完全です。フルナンバーを入力してください。")
-                    full_plate_input = st.text_input(
-                        "登録番号（フルナンバー）",
-                        value=reg_no_display if not is_incomplete else "",
-                        key=f"plate_{act_key}",
-                        placeholder="例：千葉480て9579",
-                        help="全角・半角・スペースありでも自動正規化します"
-                    )
-
-                    col_s1, col_s2 = st.columns([1, 2])
-                    with col_s1:
-                        # 予測変換（部分一致フィルタ）
-                        staff_input = st.text_input("担当者", key=f"staff_{act_key}",
-                                                     placeholder="名前を入力")
-                        filtered_staff = [s for s in staff_list_card
-                                          if staff_input.lower() in s.lower()] if staff_input else staff_list_card
-                        staff_sel = st.selectbox("候補", filtered_staff or ["─"],
-                                                  key=f"staff_sel_{act_key}")
-                    with col_s2:
-                        # 車検フェーズ（車検未予約の場合のみ）
-                        shaken_status_now = str(row.get("車検予約状況_最新", "予約なし"))
-                        if shaken_status_now not in ["車検予約済"]:
-                            st.markdown("**🔑 車検提案フェーズ**")
-                            shaken_phase_sel = st.radio(
-                                "車検",
-                                options=list(SHAKEN_PHASES.values()),
-                                index=0,
-                                key=f"shaken_{act_key}",
-                                horizontal=True,
-                            )
-                        else:
-                            shaken_phase_sel = "本予約 ✅"
-
-                    # サービス別フェーズ（未取引サービスのみ表示）
-                    untreated_svcs = [s.strip() for s in
-                                      str(row.get("未取引サービス","")).split("、") if s.strip()]
-                    svc_phases = {}
-                    if untreated_svcs:
-                        st.markdown("**💡 サービス提案フェーズ**")
-                        svc_cols = st.columns(min(len(untreated_svcs), 3))
-                        for si, svc in enumerate(untreated_svcs):
-                            if svc == "車検":
-                                continue
-                            with svc_cols[si % 3]:
-                                svc_phases[svc] = st.radio(
-                                    svc,
-                                    options=list(SERVICE_PHASES.values()),
-                                    index=0,
-                                    key=f"svc_{act_key}_{si}",
-                                )
-
-                    memo_input = st.text_input("備考（任意）", key=f"memo_{act_key}",
-                                               placeholder="次回への申し送り等")
-
-                    # 保存済みフラグ（セッション内で管理・rerun不要）
-                    saved_key = f"saved_{act_key}"
+                    # 保存済みの場合は記録内容を表示
                     if st.session_state.get(saved_key):
-                        st.success("✅ 保存済み")
-                    elif st.button("💾 保存", key=f"save_{act_key}", type="primary",
-                                   use_container_width=True):
-                        today_log_date = datetime.today().strftime("%Y-%m-%d")
-                        staff_name = staff_sel if staff_sel != "─" else staff_input
-                        shaken_expiry = str(row.get("車検満了日", ""))
+                        saved_data = st.session_state[saved_key]
+                        st.success(f"✅ 保存済み（{saved_data.get('担当者','─')}）")
+                        if st.button("✏️ 再入力", key=f"redo_{act_key}", use_container_width=True):
+                            del st.session_state[saved_key]
+                            st.rerun()
+                    else:
+                        staff_list_card = load_staff_master()
+                        shaken_status_now = str(row.get("車検予約状況_最新", "予約なし"))
+                        reg_no_display = str(row.get("登録番号", "")).strip()
+                        is_incomplete = len(reg_no_display.replace(" ","").replace("─","")) < 6
 
-                        # 登録番号を正規化（フルナンバー入力対応）
-                        reg_no_raw = str(row.get("登録番号", ""))
-                        reg_no_save = normalize_plate(full_plate_input) if full_plate_input.strip() else normalize_plate(reg_no_raw)
+                        # st.formで囲む → 保存ボタンを押すまで一切再描画しない
+                        with st.form(key=f"form_{act_key}"):
 
-                        saved_count = 0
+                            # ── 担当者（selectboxに一本化・分かりやすく）──
+                            staff_options = staff_list_card if staff_list_card else ["担当者未登録"]
+                            staff_sel = st.selectbox(
+                                "👤 担当者",
+                                options=staff_options,
+                                key=f"staff_sel_{act_key}",
+                                help="サイドバーの「担当者マスター」から追加できます"
+                            )
 
-                        # 車検ログ保存
-                        if shaken_status_now not in ["車検予約済"]:
-                            ok = save_activity_log({
-                                "log_id"   : str(uuid.uuid4())[:8],
+                            # ── 登録番号（不完全な場合のみ入力欄を表示）──
+                            if is_incomplete:
+                                st.warning("⚠️ 登録番号が不完全です。フルナンバーを入力してください。")
+                                full_plate_input = st.text_input(
+                                    "登録番号（フルナンバー）",
+                                    placeholder="例：千葉480て9579",
+                                    help="全角・半角・スペースありでも自動正規化します"
+                                )
+                            else:
+                                full_plate_input = ""
+
+                            st.markdown("---")
+
+                            # ── 車検提案フェーズ ──
+                            if shaken_status_now not in ["車検予約済"]:
+                                st.markdown("**🔑 車検提案**")
+                                shaken_phase_sel = st.radio(
+                                    "車検フェーズ",
+                                    options=list(SHAKEN_PHASES.values()),
+                                    index=0,
+                                    horizontal=True,
+                                    label_visibility="collapsed"
+                                )
+                            else:
+                                shaken_phase_sel = "本予約 ✅"
+                                st.markdown("✅ 車検予約済み")
+
+                            # ── サービス別フェーズ（未取引のみ）──
+                            untreated_svcs = [s.strip() for s in
+                                str(row.get("未取引サービス","")).split("、") if s.strip() and s.strip() != "車検"]
+                            svc_phases = {}
+                            if untreated_svcs:
+                                st.markdown("**💡 サービス提案**")
+                                svc_cols = st.columns(min(len(untreated_svcs), 3))
+                                for si, svc in enumerate(untreated_svcs):
+                                    with svc_cols[si % 3]:
+                                        svc_phases[svc] = st.radio(
+                                            svc,
+                                            options=list(SERVICE_PHASES.values()),
+                                            index=0,
+                                        )
+
+                            memo_input = st.text_input(
+                                "📝 備考（任意）",
+                                placeholder="次回への申し送り等"
+                            )
+
+                            submitted = st.form_submit_button(
+                                "💾 Notionに保存",
+                                type="primary",
+                                use_container_width=True
+                            )
+
+                        # フォーム外で保存処理（rerun不要）
+                        if submitted:
+                            today_log_date = datetime.today().strftime("%Y-%m-%d")
+                            reg_no_raw = str(row.get("登録番号", ""))
+                            reg_no_save = normalize_plate(full_plate_input) if full_plate_input.strip() else normalize_plate(reg_no_raw)
+                            shaken_expiry = str(row.get("車検満了日", ""))
+                            saved_count = 0
+                            base_log = {
                                 "記録日"   : today_log_date,
                                 "顧客ID"   : cust_id_str,
                                 "車両ID"   : veh_id_str,
                                 "登録番号" : reg_no_save,
-                                "担当者"   : staff_name,
+                                "担当者"   : staff_sel,
                                 "店舗"     : str(row.get("入庫店舗ID", "")),
                                 "ランク"   : str(row.get("ランク", "")),
-                                "提案項目" : "車検",
-                                "フェーズ" : shaken_phase_sel,
-                                "車検満了日": shaken_expiry,
-                                "備考"     : memo_input,
-                            })
-                            if ok: saved_count += 1
-
-                        # サービス別ログ保存
-                        for svc, phase in svc_phases.items():
-                            if phase != "─ 未記録":
-                                ok = save_activity_log({
+                            }
+                            # 車検ログ
+                            if shaken_status_now not in ["車検予約済"]:
+                                ok = save_activity_log({**base_log,
                                     "log_id"   : str(uuid.uuid4())[:8],
-                                    "記録日"   : today_log_date,
-                                    "顧客ID"   : cust_id_str,
-                                    "車両ID"   : veh_id_str,
-                                    "登録番号" : reg_no_save,
-                                    "担当者"   : staff_name,
-                                    "店舗"     : str(row.get("入庫店舗ID", "")),
-                                    "ランク"   : str(row.get("ランク", "")),
-                                    "提案項目" : svc,
-                                    "フェーズ" : phase,
-                                    "車検満了日": "",
+                                    "提案項目" : "車検",
+                                    "フェーズ" : shaken_phase_sel,
+                                    "車検満了日": shaken_expiry,
                                     "備考"     : memo_input,
                                 })
                                 if ok: saved_count += 1
+                            # サービス別ログ
+                            for svc, phase in svc_phases.items():
+                                if phase != "─ 未記録":
+                                    ok = save_activity_log({**base_log,
+                                        "log_id"   : str(uuid.uuid4())[:8],
+                                        "提案項目" : svc,
+                                        "フェーズ" : phase,
+                                        "車検満了日": "",
+                                        "備考"     : memo_input,
+                                    })
+                                    if ok: saved_count += 1
 
-                        if saved_count > 0:
-                            # 保存成功：セッションにフラグを立てるだけ（rerun不要）
-                            st.session_state[saved_key] = True
-                            st.success(f"✅ {saved_count}件をNotionに保存しました")
-                        else:
-                            st.error("保存に失敗しました。NOTION_TOKENを確認してください。")
+                            if saved_count > 0:
+                                st.session_state[saved_key] = {**base_log, "件数": saved_count}
+                                st.success(f"✅ {saved_count}件をNotionに保存しました")
+                            else:
+                                st.error("保存に失敗しました。Notion接続を確認してください。")
 
             # ── CSV ダウンロード ──
             st.markdown("")
