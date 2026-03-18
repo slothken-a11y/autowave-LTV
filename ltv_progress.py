@@ -230,25 +230,26 @@ def assign_rank_customer(cust_row):
     顧客ID起点のランク定義（確定版）
     ─────────────────────────────────
     SSS：複数台で車検取引あり かつ 自動車販売あり
-    S  ：車検あり かつ 自動車販売あり（1台）
+    S  ：自動車販売あり（車検有無問わず）
+         ※新車購入後は車検未到来のため車検なしでもSランク
     A  ：車検あり かつ オイル交換あり かつ タイヤ交換あり
     B  ：車検あり（A未満）
     C  ：車検なし かつ メンテ来店あり（オイル/タイヤ/バッテリー/コーティング/ワイパー）
     D  ：ほぼ未取引
     """
-    shaken    = cust_row.get("cust_車検", 0) >= 1
-    sales     = cust_row.get("cust_自動車販売", 0) >= 1
+    shaken       = cust_row.get("cust_車検", 0) >= 1
+    sales        = cust_row.get("cust_自動車販売", 0) >= 1
     multi_shaken = cust_row.get("cust_車検台数", 0) >= 2
-    oil       = cust_row.get("cust_オイル交換", 0) >= 1
-    tire      = cust_row.get("cust_タイヤ交換", 0) >= 1
-    maint     = (cust_row.get("cust_オイル交換", 0) +
-                 cust_row.get("cust_タイヤ交換", 0) +
-                 cust_row.get("cust_バッテリー交換", 0) +
-                 cust_row.get("cust_コーティング", 0) +
-                 cust_row.get("cust_ワイパー交換", 0)) >= 1
+    oil          = cust_row.get("cust_オイル交換", 0) >= 1
+    tire         = cust_row.get("cust_タイヤ交換", 0) >= 1
+    maint        = (cust_row.get("cust_オイル交換", 0) +
+                    cust_row.get("cust_タイヤ交換", 0) +
+                    cust_row.get("cust_バッテリー交換", 0) +
+                    cust_row.get("cust_コーティング", 0) +
+                    cust_row.get("cust_ワイパー交換", 0)) >= 1
 
     if multi_shaken and sales: return "SSS"
-    if shaken and sales:       return "S"
+    if sales:                  return "S"   # 車検有無問わず車販あればS
     if shaken and oil and tire: return "A"
     if shaken:                 return "B"
     if maint:                  return "C"
@@ -626,12 +627,13 @@ with st.sidebar:
 | ランク | 定義 |
 |---|---|
 | 🏆 **SSS** | 複数台車検＋自動車販売 |
-| 🥇 **S** | 車検＋自動車販売 |
+| 🥇 **S** | 自動車販売あり（車検有無問わず） |
 | 🥈 **A** | 車検＋オイル＋タイヤ |
 | 🥉 **B** | 車検あり（A未満） |
 | **C** | 車検なし・メンテ来店 |
 | **D** | ほぼ未取引 |
 """)
+    st.caption("※S：新車購入後は車検未到来のため車検なしでもSランク")
     st.caption("※ランクは顧客ID単位で判定します")
     # 旧ロジック互換（フォールバック用）
     thresholds = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 0}
@@ -1261,6 +1263,29 @@ else:
 total = len(df_master)
 rank_counts = df_master["ランク"].value_counts()
 stores = sorted(df_master["入庫店舗ID"].dropna().unique())
+
+# ──────────────────────────────────────────────
+# 顧客ID起点の集計（ダッシュボード用）
+# ──────────────────────────────────────────────
+if "顧客ID" in df_master.columns:
+    cust_rank_df = df_master.drop_duplicates(subset="顧客ID", keep="first")
+    cust_rank_counts = cust_rank_df["ランク"].value_counts()
+    total_cust = len(cust_rank_df)
+    # 離脱警告：車販あり・車検なし
+    has_sales_col = "取引_自動車販売" in df_master.columns
+    has_shaken_col = "取引_車検" in df_master.columns
+    if has_sales_col and has_shaken_col:
+        lost_cust_df = cust_rank_df[
+            (cust_rank_df["取引_自動車販売"] >= 1) &
+            (cust_rank_df["取引_車検"] == 0)
+        ]
+        lost_cust_count = len(lost_cust_df)
+    else:
+        lost_cust_count = 0
+else:
+    cust_rank_counts = rank_counts
+    total_cust = total
+    lost_cust_count = 0
 
 
 # ══════════════════════════════════════════════
@@ -2209,19 +2234,22 @@ with tab0:
 with tab1:
     st.markdown('<div class="sec">📊 全社サマリー</div>', unsafe_allow_html=True)
 
-    s_cnt  = rank_counts.get("S", 0)
-    a_cnt  = rank_counts.get("A", 0)
-    b_cnt  = rank_counts.get("B", 0)
-    cd_cnt = rank_counts.get("C", 0) + rank_counts.get("D", 0)
-    rsv_cnt = (df_master["予約件数"] > 0).sum()
+    # 顧客ID起点のカウント
+    sss_cnt = cust_rank_counts.get("SSS", 0)
+    s_cnt   = cust_rank_counts.get("S", 0)
+    a_cnt   = cust_rank_counts.get("A", 0)
+    b_cnt   = cust_rank_counts.get("B", 0)
+    cd_cnt  = cust_rank_counts.get("C", 0) + cust_rank_counts.get("D", 0)
+    rsv_cnt = (df_master["予約件数"] > 0).sum() if "予約件数" in df_master.columns else 0
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    for col, (lbl, val, sub, cls) in zip([c1, c2, c3, c4, c5], [
-        ("管理車両台数",         f"{total:,}台",       "CSVロード総数",                   ""),
-        ("Sランク（生涯顧客）",  f"{s_cnt:,}台",       f"全体の{s_cnt/total*100:.1f}%",   "gold"),
-        ("A+Bランク（育成層）",  f"{a_cnt+b_cnt:,}台", f"全体の{(a_cnt+b_cnt)/total*100:.1f}%", "purple"),
-        ("C+Dランク（未育成）",  f"{cd_cnt:,}台",      f"全体の{cd_cnt/total*100:.1f}%",  "gray"),
-        ("予約取得済み顧客",     f"{rsv_cnt:,}台",     f"全体の{rsv_cnt/total*100:.1f}%", "green"),
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    for col, (lbl, val, sub, cls) in zip([c1, c2, c3, c4, c5, c6], [
+        ("管理顧客数（人）",          f"{total_cust:,}人",        f"管理車両{total:,}台",               ""),
+        ("🏆SSS+S（完全囲い込み）",   f"{sss_cnt+s_cnt:,}人",     f"全体の{(sss_cnt+s_cnt)/total_cust*100:.1f}%", "gold"),
+        ("🥈A（来店習慣定着）",       f"{a_cnt:,}人",             f"全体の{a_cnt/total_cust*100:.1f}%", "purple"),
+        ("🥉B（車検定着）",           f"{b_cnt:,}人",             f"全体の{b_cnt/total_cust*100:.1f}%", "green"),
+        ("C+D（未育成）",             f"{cd_cnt:,}人",            f"全体の{cd_cnt/total_cust*100:.1f}%","gray"),
+        ("🚨車販あり・車検なし",       f"{lost_cust_count:,}人",   "離脱警告",                          "red" if lost_cust_count > 0 else ""),
     ]):
         with col:
             st.markdown(f"""<div class="kpi-card {cls}">
@@ -2231,26 +2259,29 @@ with tab1:
     st.markdown("")
 
     # ① ランク別台数グラフ
-    st.markdown('<div class="sec">① ランク別台数構成 ─ Sランクが「生涯顧客」</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">① ランク別顧客数構成（顧客ID起点）─ SSS+Sが「完全囲い込み」</div>', unsafe_allow_html=True)
     col_l, col_r = st.columns(2)
     with col_l:
-        rnk_order = ["S", "A", "B", "C", "D"]
+        rnk_order = ["SSS", "S", "A", "B", "C", "D"]
         rnk_df = pd.DataFrame({
             "ランク": rnk_order,
-            "台数": [rank_counts.get(r, 0) for r in rnk_order],
+            "人数（顧客ID起点）": [cust_rank_counts.get(r, 0) for r in rnk_order],
         }).set_index("ランク")
         st.bar_chart(rnk_df, color="#1a56db")
     with col_r:
         rows = []
         for r in rnk_order:
-            dr = df_master[df_master["ランク"] == r]
-            if len(dr) == 0:
+            dr_c = cust_rank_df[cust_rank_df["ランク"] == r]
+            dr   = df_master[df_master["ランク"] == r]
+            if len(dr_c) == 0:
                 continue
+            rsv_rate = f"{(dr['予約件数']>0).sum()/len(dr)*100:.1f}%" if "予約件数" in dr.columns and len(dr) > 0 else "─"
             rows.append({
-                "ランク": r, "台数": len(dr),
-                "割合": f"{len(dr)/total*100:.1f}%",
-                "平均取引数": f"{dr['取引サービス数'].mean():.1f}",
-                "予約取得率": f"{(dr['予約件数']>0).sum()/len(dr)*100:.1f}%",
+                "ランク": r,
+                "人数": f"{len(dr_c):,}人",
+                "割合": f"{len(dr_c)/total_cust*100:.1f}%",
+                "平均取引数": f"{dr['取引サービス数'].mean():.1f}" if len(dr) > 0 else "─",
+                "予約取得率": rsv_rate,
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -2747,7 +2778,7 @@ with tab5:
 
     cf1, cf2, cf3 = st.columns(3)
     with cf1:
-        rnk_sel = st.multiselect("ランク", ["S","A","B","C","D"], default=["S","A"], key="rnk_sel")
+        rnk_sel = st.multiselect("ランク", ["SSS","S","A","B","C","D"], default=["SSS","S","A"], key="rnk_sel")
     with cf2:
         st_sel = st.multiselect("店舗", stores, default=stores, key="st_sel")
     with cf3:
