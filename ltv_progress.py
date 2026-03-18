@@ -39,49 +39,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ──────────────────────────────────────────────
-# パスワード認証
-# ──────────────────────────────────────────────
-def check_password():
-    try:
-        correct_password = st.secrets["password"]
-    except Exception:
-        return True  # secrets未設定（ローカル環境）はスルー
-
-    if st.session_state.get("authenticated"):
-        return True
-
-    st.markdown("""
-    <div style="
-        max-width:400px; margin:80px auto; padding:2rem;
-        background:#fff; border-radius:12px;
-        box-shadow:0 4px 20px rgba(0,0,0,0.1);
-        text-align:center;
-    ">
-        <div style="font-size:3rem;">📈</div>
-        <h2 style="color:#1a237e; margin:0.5rem 0;">生涯顧客LTV進捗管理</h2>
-        <p style="color:#666; font-size:0.9rem;">株式会社オートウェーブ</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    with st.form("login_form"):
-        st.markdown("<div style='max-width:400px;margin:0 auto;'>", unsafe_allow_html=True)
-        password = st.text_input("パスワード", type="password", placeholder="パスワードを入力してください")
-        submitted = st.form_submit_button("ログイン", use_container_width=True, type="primary")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        if submitted:
-            if password == correct_password:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("パスワードが違います。")
-
-    return False
-
-if not check_password():
-    st.stop()
-
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap');
@@ -138,11 +95,38 @@ st.markdown("""
 # ──────────────────────────────────────────────
 # 定数
 # ──────────────────────────────────────────────
-DEFAULT_SERVICES = ["車検", "タイヤ交換", "オイル交換", "12か月点検", "バッテリー交換", "コーティング", "自動車販売"]
+DEFAULT_SERVICES = ["車検", "タイヤ交換", "オイル交換", "12ヶ月点検", "バッテリー交換", "コーティング", "自動車販売", "ワイパー交換", "保険"]
+
+# ファイル名→サービス名のマッピング（実際のファイル名が異なる場合）
+FILE_TO_SERVICE = {
+    "12か月点検"        : "12ヶ月点検",
+    "ボディーコート（silver）": "コーティング",
+}
+
+# 売上単価
 SERVICE_PRICE = {
-    "車検": 80000, "タイヤ交換": 40000, "オイル交換": 5000,
-    "12か月点検": 15000, "バッテリー交換": 20000,
-    "コーティング": 60000, "自動車販売": 2000000,
+    "車検"      : 50000,
+    "タイヤ交換" : 60000,
+    "オイル交換" : 5000,
+    "12ヶ月点検" : 10000,
+    "バッテリー交換": 20000,
+    "コーティング"  : 11000,
+    "自動車販売" : 2100000,
+    "ワイパー交換": 3500,
+    "保険"      : 60000,
+}
+
+# 粗利単価（LTV計算に使用）
+SERVICE_GROSS = {
+    "車検"      : 30000,
+    "タイヤ交換" : 18000,
+    "オイル交換" : 3500,
+    "12ヶ月点検" : 10000,
+    "バッテリー交換": 8000,
+    "コーティング"  : 10000,
+    "自動車販売" : 250000,
+    "ワイパー交換": 2000,
+    "保険"      : 12000,
 }
 
 
@@ -180,6 +164,34 @@ def assign_rank(n, thr):
             return r
     return "D"
 
+
+# ──────────────────────────────────────────────
+# GoogleドライブファイルID定義（Streamlit Cloud用）
+# ──────────────────────────────────────────────
+GDRIVE_IDS_LTV = {
+    "Master_Data.csv"              : "1x8G8rfKrWlMRQHk24YXj1njFgliyh90a",
+    "車検.csv"                      : "1mUuntuW0XQQmlKnxCZTc1VkIMNX128ny",
+    "タイヤ交換.csv"                 : "1KOaf52KjimPybOAti_LV9h1g1i3SflBc",
+    "オイル交換.csv"                 : "1f006hLzchj5AYSTMnFD4Rq9P7T5fvD4q",
+    "12ヶ月点検.csv"                 : "1LeODLrzZ85NpCbbXyEQSrumO6Uj3ejSs",
+    "バッテリー交換.csv"              : "1Ik3JoDV2SRpC-u5GBc21SYqxwBm2xVFW",
+    "ボディーコート（silver）.csv"    : "1JYtBXW3xh4Wd9pDicn3Y3RtD1NVRxsMu",
+    "ワイパー交換.csv"                : "1piJojvcbgK6ZzhZAB7QdrVnbdMNaP64G",
+    "自動車販売.csv"                 : "1iKwaN3AK_XmVqpvXNupBlF10Apgkw4d6",
+    "Reservation.csv"               : "1qUHPbUHusS40jT0nAcNaaY2vEo0AfT7i",
+    "保険.csv"                      : "",  # 作成後に設定
+}
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_gdrive_csv(file_id: str, name: str) -> pd.DataFrame:
+    """GoogleドライブからCSVを読み込む（5分キャッシュ）"""
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    for enc in ["cp932", "utf-8-sig", "utf-8", "shift_jis"]:
+        try:
+            return pd.read_csv(url, encoding=enc)
+        except Exception:
+            continue
+    raise ValueError(f"{name} をGoogleドライブから読み込めませんでした。")
 
 # ──────────────────────────────────────────────
 # データフォルダ自動読込ユーティリティ
@@ -449,12 +461,14 @@ mkdir C:/SATO/LTV/data
 # データ読み込み & 突合
 # ══════════════════════════════════════════════
 
-# ── マスターデータ読み込み（手動優先 > 自動）──
+# ── マスターデータ読み込み（手動優先 > Googleドライブ > dataフォルダ）──
 try:
     if f_master is not None:
         df_master = norm(read_csv(f_master, "マスターデータ"))
     elif auto_master_path is not None:
         df_master = norm(read_path(auto_master_path, "マスターデータ"))
+    elif GDRIVE_IDS_LTV.get("Master_Data.csv"):
+        df_master = norm(load_gdrive_csv(GDRIVE_IDS_LTV["Master_Data.csv"], "Master_Data.csv"))
     else:
         st.error("マスターデータが見つかりません。")
         st.stop()
@@ -479,29 +493,44 @@ txn_sets = {}    # {svc: set(キー値)}
 txn_dates = {}   # {svc: {キー値: 最終取引日}}
 txn_key = {}     # {svc: "車両ID" or "登録番号"}  マスター側の結合キー
 
-# 手動アップロード優先 > dataフォルダ自動読込
-_txn_sources = []  # (サービス名, DataFrameまたはPath)
+# 手動アップロード優先 > dataフォルダ > Googleドライブ
+_txn_sources = []  # (モード, ソース)
 if f_txns:
-    # 手動アップロードがある場合はそちらを使用
     _txn_sources = [("upload", f) for f in f_txns]
 elif auto_txn_paths:
-    # dataフォルダの取引CSVを自動読込
     _txn_sources = [("auto", p) for p in auto_txn_paths]
+else:
+    # Googleドライブからすべての取引CSVを読み込む
+    for fname, fid in GDRIVE_IDS_LTV.items():
+        if fname in ("Master_Data.csv", "Reservation.csv", "保険.csv") or not fid:
+            continue
+        _txn_sources.append(("gdrive", (fname, fid)))
 
 if _txn_sources:
     for mode, src in _txn_sources:
         if mode == "upload":
             f = src
-            svc = f.name.replace(".csv", "").replace(".CSV", "").strip()
+            raw_svc = f.name.replace(".csv", "").replace(".CSV", "").strip()
+            svc = FILE_TO_SERVICE.get(raw_svc, raw_svc)
             try:
                 df_t = norm(read_csv(f, svc))
             except Exception:
                 st.warning(f"⚠️ {f.name} を読み込めませんでした")
                 continue
+        elif mode == "gdrive":
+            fname, fid = src
+            raw_svc = fname.replace(".csv", "").replace(".CSV", "").strip()
+            svc = FILE_TO_SERVICE.get(raw_svc, raw_svc)
+            try:
+                df_t = norm(load_gdrive_csv(fid, fname))
+            except Exception:
+                st.warning(f"⚠️ {fname}（Googleドライブ）を読み込めませんでした")
+                continue
         else:
             # auto mode: src is a Path
             p = src
-            svc = p.name.replace(".csv", "").replace(".CSV", "").strip()
+            raw_svc = p.name.replace(".csv", "").replace(".CSV", "").strip()
+            svc = FILE_TO_SERVICE.get(raw_svc, raw_svc)
             try:
                 df_t = norm(read_path(p, svc))
             except Exception:
@@ -514,17 +543,34 @@ if _txn_sources:
             vc = find_col(df_t, ["登録番号", "vehicle_number", "ナンバー", "reg_num"])
             master_key = "登録番号"
             if not vc:
-                st.warning(f"⚠️ {f.name}：「登録番号」列が見つかりません（自動車販売は登録番号キーが必要です）")
+                st.warning(f"⚠️ {svc}：「登録番号」列が見つかりません（自動車販売は登録番号キーが必要です）")
                 continue
+        elif svc == "保険":
+            # 保険：登録番号キー・保険満期日列を使用
+            vc = find_col(df_t, ["登録番号", "vehicle_number", "ナンバー"])
+            master_key = "登録番号"
+            if not vc:
+                st.warning(f"⚠️ 保険.csv：「登録番号」列が見つかりません")
+                continue
+            # 保険満期日をマスターに追加
+            dc_ins = find_col(df_t, ["保険満期日", "満期日", "insurance_expiry"])
+            if dc_ins:
+                df_t[vc] = df_t[vc].astype(str).str.replace(" ", "", regex=False).str.strip()
+                ins_map = df_t.dropna(subset=[dc_ins]).groupby(vc)[dc_ins].max().to_dict()
+                if "登録番号" not in df_master.columns:
+                    df_master["登録番号"] = df_master.get("登録番号", "")
+                df_master["登録番号_str"] = df_master["登録番号"].astype(str).str.replace(" ", "", regex=False).str.strip()
+                df_master["保険満期日"] = df_master["登録番号_str"].map(ins_map)
+                df_master.drop(columns=["登録番号_str"], inplace=True, errors="ignore")
         else:
             # その他サービス：車両IDキー
             vc = find_col(df_t, ["車両ID", "VehicleID", "vehicle_id"])
             master_key = "車両ID"
             if not vc:
-                st.warning(f"⚠️ {f.name}：「車両ID」列が見つかりません")
+                st.warning(f"⚠️ {svc}：「車両ID」列が見つかりません")
                 continue
 
-        dc = find_col(df_t, ["前回取引日", "取引日", "最終取引日", "日付", "date", "Date"])
+        dc = find_col(df_t, ["前回取引日", "取引日", "最終取引日", "日付", "date", "Date", "保険満期日", "満期日"])
         df_t[vc] = df_t[vc].astype(str).str.strip()
         txn_sets[svc]  = set(df_t[vc].dropna())
         txn_key[svc]   = master_key
@@ -582,6 +628,12 @@ flag_matrix = np.column_stack([df_master[c].values for c in txn_cols])
 df_master["取引サービス数"] = flag_matrix.sum(axis=1).astype(int)
 df_master["ランク"] = df_master["取引サービス数"].apply(lambda n: assign_rank(n, thresholds))
 
+# ── 売上LTV・粗利LTV計算 ──
+sales_arr  = np.array([SERVICE_PRICE.get(s, 0) for s in all_services])
+gross_arr  = np.array([SERVICE_GROSS.get(s, 0) for s in all_services])
+df_master["売上LTV"] = flag_matrix.dot(sales_arr).astype(int)
+df_master["粗利LTV"] = flag_matrix.dot(gross_arr).astype(int)
+
 # 未取引サービス列をNumPy演算で生成（apply不使用）
 untreated_list = []
 for i in range(len(df_master)):
@@ -598,8 +650,10 @@ if has_rsv:
     try:
         if f_rsv is not None:
             df_rsv = norm(read_csv(f_rsv, "予約データ"))
-        else:
+        elif auto_rsv_path is not None:
             df_rsv = norm(read_path(auto_rsv_path, "予約データ"))
+        elif GDRIVE_IDS_LTV.get("Reservation.csv"):
+            df_rsv = norm(load_gdrive_csv(GDRIVE_IDS_LTV["Reservation.csv"], "Reservation.csv"))
         for orig, std in [
             (["登録番号", "vehicle_number", "ナンバー", "reg_num"], "登録番号"),
             (["サービス種別", "service", "サービス", "取引種別", "種別"], "サービス種別"),
@@ -849,6 +903,11 @@ with tab0:
                 actions = []
 
                 # Sランク専用：最優先対応
+                # 経過年数を取得（generate_action内）
+                reg_date_action = row.get("初年度登録", None)
+                elapsed_action = calc_elapsed(reg_date_action) if reg_col else None
+                elapsed_years_action = elapsed_action[0] if elapsed_action else 0
+
                 if rank == "S":
                     if days_to_exp is not None and 0 <= days_to_exp <= 180:
                         actions.append(f"🔴【最優先】車検満期まで{days_to_exp}日。乗り換え相談＋車検予約を獲得する")
@@ -856,6 +915,9 @@ with tab0:
                         actions.append("🌟【Sランク特別対応】担当者が直接挨拶。カーライフ状況をヒアリングし関係を深める")
                     if "自動車販売" in untreated_list and days_to_exp and days_to_exp <= 365:
                         actions.append("🚗 乗り換え提案：現在の車の年数・走行距離を確認し次の車を提案する")
+                    # 10年超の場合は乗り換え提案を強調
+                    if elapsed_years_action >= 10:
+                        actions.append(f"🚨 車齢{elapsed_years_action}年！乗り換えニーズが高い可能性。新車・中古車提案を積極的に")
 
                 # A・Bランク：クロスセル提案
                 elif rank in ["A", "B"]:
@@ -927,6 +989,43 @@ with tab0:
             else:
                 df_today["車検残日数"] = None
 
+            # 経過年数を計算（初年度登録列から）
+            def calc_elapsed(reg_date):
+                """初年度登録日から今日までの経過年数・月数を返す"""
+                if pd.isna(reg_date):
+                    return None
+                try:
+                    reg = pd.Timestamp(reg_date)
+                    today_ts = pd.Timestamp(today_dt)
+                    years = today_ts.year - reg.year
+                    months = today_ts.month - reg.month
+                    if months < 0:
+                        years -= 1
+                        months += 12
+                    return (years, months)
+                except Exception:
+                    return None
+
+            def elapsed_badge(reg_date):
+                """経過年数をバッジHTML形式で返す（10年超は赤）"""
+                result = calc_elapsed(reg_date)
+                if result is None:
+                    return "─"
+                years, months = result
+                label = f"{years}年{months}ヶ月"
+                if years >= 10:
+                    return f'<span style="background:#fef2f2;color:#dc2626;padding:2px 8px;border-radius:8px;font-weight:700;font-size:0.82rem;">🚨 {label}</span>'
+                elif years >= 7:
+                    return f'<span style="background:#fffbeb;color:#d97706;padding:2px 8px;border-radius:8px;font-weight:600;font-size:0.82rem;">{label}</span>'
+                else:
+                    return f'<span style="background:#f0fdf4;color:#059669;padding:2px 8px;border-radius:8px;font-size:0.82rem;">{label}</span>'
+
+            reg_col = "初年度登録" if "初年度登録" in df_today.columns else None
+            if reg_col:
+                df_today["経過年数_tuple"] = df_today[reg_col].apply(calc_elapsed)
+                df_today["経過年数_years"] = df_today["経過年数_tuple"].apply(
+                    lambda x: x[0] if x else None)
+
             # アクション生成
             df_today["接客指示"] = df_today.apply(generate_action, axis=1)
 
@@ -974,7 +1073,8 @@ with tab0:
 </div>
 <div style="font-size:0.85rem;color:#444;margin-bottom:0.4rem;">
   <strong>本日のサービス：</strong>{row.get('サービス種別','─')}　
-  <strong>未取引：</strong>{row.get('未取引サービス','─')}
+  <strong>未取引：</strong>{row.get('未取引サービス','─')}　
+  <strong>経過年数：</strong>{elapsed_badge(row.get('初年度登録')) if reg_col else '─'}
 </div>
 <div style="background:#fff8e1;border-radius:8px;padding:0.5rem 0.8rem;font-size:0.85rem;color:#92400e;font-weight:600;">
   📌 接客指示：{row.get('接客指示','通常対応')}
@@ -1076,6 +1176,7 @@ with tab0:
 <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.3rem;flex-wrap:wrap;">
   <span style="font-size:0.8rem;color:#555;">本日：<strong>{row.get('サービス種別','─')}</strong></span>
   <span style="{sh_style};padding:2px 9px;border-radius:8px;font-size:0.78rem;font-weight:700;">{sh_label}</span>
+  <span style="font-size:0.8rem;">経過：{elapsed_badge(row.get('初年度登録')) if reg_col else '─'}</span>
   <span style="margin-left:auto;font-size:0.8rem;">車検満期：{days_badge(exp_days)}</span>
 </div>
 <div style="font-size:0.8rem;color:#666;margin-bottom:0.3rem;">
@@ -1091,7 +1192,7 @@ with tab0:
             # ── CSV ダウンロード ──
             st.markdown("")
             dl_cols = ["予約時刻", "登録番号", "サービス種別", "予約ステータス", "入庫店舗ID",
-                       "ランク", "取引サービス数", "未取引サービス", "車検残日数", "接客指示"]
+                       "ランク", "取引サービス数", "未取引サービス", "車検残日数", "経過年数_years", "接客指示"]
             dl_cols_exist = [c for c in dl_cols if c in df_today.columns]
 
             btn_col1, btn_col2 = st.columns(2)
@@ -1286,6 +1387,19 @@ with tab0:
                                 "相談中":     colors.HexColor("#075985"),
                             }.get(shaken_st, colors.HexColor("#475569"))
 
+                            # 経過年数テキスト（PDF用）
+                            reg_date_pdf = row.get("初年度登録", None)
+                            elapsed_pdf = calc_elapsed(reg_date_pdf) if reg_col else None
+                            if elapsed_pdf:
+                                years_p, months_p = elapsed_pdf
+                                elapsed_txt = f"{years_p}年{months_p}ヶ月"
+                                elapsed_color_pdf = colors.HexColor("#dc2626") if years_p >= 10 else colors.HexColor("#475569")
+                                elapsed_alert = "🚨" if years_p >= 10 else ""
+                            else:
+                                elapsed_txt = "─"
+                                elapsed_color_pdf = colors.HexColor("#475569")
+                                elapsed_alert = ""
+
                             # 時刻表示（あれば）
                             time_txt = f"[{rsv_time_pdf}] " if rsv_time_pdf else ""
                             name_car = f"{customer_name_pdf}　{car_model_pdf}".strip("　")
@@ -1294,7 +1408,8 @@ with tab0:
                                 Paragraph(f"{rank}ランク", ParagraphStyle("rk", fontName=FONT, fontSize=9, textColor=fg, leading=12)),
                                 Paragraph(f"{time_txt}{reg_no}", ParagraphStyle("hd", fontName=FONT, fontSize=9, leading=12)),
                                 Paragraph(name_car or store_name, ParagraphStyle("nm", fontName=FONT, fontSize=8.5, leading=12)),
-                                Paragraph(f"車検満期：{exp_txt}", ParagraphStyle("ex", fontName=FONT, fontSize=8, leading=11)),
+                                Paragraph(f"車検満期：{exp_txt}　経過：{elapsed_alert}{elapsed_txt}",
+                                          ParagraphStyle("ex", fontName=FONT, fontSize=8, textColor=elapsed_color_pdf, leading=11)),
                             ]]
                             # 車検ステータス＋サービス行
                             status_svc_data = [[
