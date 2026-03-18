@@ -29,6 +29,8 @@ import numpy as np
 from datetime import datetime, timedelta
 from io import BytesIO
 import os
+import uuid
+import json
 from pathlib import Path
 
 # ──────────────────────────────────────────────
@@ -208,6 +210,21 @@ def assign_rank(n, thr):
             return r
     return "D"
 
+def normalize_plate(plate: str) -> str:
+    """
+    登録番号を正規化する（全角→半角・スペース除去・大文字統一）
+    例：「千葉　４８０　て　９５７９」→「千葉480て9579」
+    """
+    import unicodedata
+    if not plate or str(plate) in ["nan", "None", ""]:
+        return ""
+    s = str(plate).strip()
+    # 全角→半角変換（数字・英字）
+    s = unicodedata.normalize("NFKC", s)
+    # スペース（全角・半角）除去
+    s = s.replace(" ", "").replace("　", "").replace("　", "")
+    return s
+
 def assign_rank_customer(cust_row):
     """
     顧客ID起点のランク定義（確定版）
@@ -247,6 +264,215 @@ RANK_LABEL = {
 }
 RANK_ORDER = ["SSS", "S", "A", "B", "C", "D"]
 
+# ──────────────────────────────────────────────
+# 営業活動ログ：Storage API ユーティリティ
+# ──────────────────────────────────────────────
+# フェーズ定義
+SHAKEN_PHASES = {
+    "0": "─ 未記録",
+    "1": "提案できなかった",
+    "2": "提案した",
+    "3": "興味あり ⭐",
+    "4": "仮予約 📅",
+    "5": "本予約 ✅",
+}
+SERVICE_PHASES = {
+    "0": "─ 未記録",
+    "1": "提案できなかった",
+    "2": "提案した",
+    "3": "興味あり ⭐",
+    "4": "売れた ✅",
+}
+PHASE_WEIGHT = {"0":0,"1":1,"2":2,"3":3,"4":4,"5":5}
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_staff_from_gdrive(file_id: str) -> list:
+    """GoogleドライブからCSVで担当者マスターを読み込む"""
+    try:
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        df_s = pd.read_csv(url, encoding="utf-8-sig", header=None)
+        return df_s.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+    except Exception:
+        return []
+
+def load_staff_master() -> list:
+    """担当者マスターを読み込む（Googleドライブ優先 → Storage API → デフォルト）"""
+    # セッションキャッシュ
+    cached = st.session_state.get("_staff_cache")
+    if cached is not None:
+        return cached
+
+    # ① Googleドライブから読み込み（ファイルIDが設定されている場合）
+    if GDRIVE_STAFF_ID:
+        staff = load_staff_from_gdrive(GDRIVE_STAFF_ID)
+        if staff:
+            st.session_state["_staff_cache"] = staff
+            return staff
+
+    # ② セッション内の追加分
+    local = st.session_state.get("_staff_master_local")
+    if local:
+        st.session_state["_staff_cache"] = local
+        return local
+
+    # ③ デフォルト
+    return ["佐藤", "田中", "鈴木", "高橋", "伊藤"]
+
+def save_staff_master(staff_list: list):
+    """担当者マスターをセッションに保存（Notion APIトークン不要）"""
+    st.session_state["_staff_master_local"] = staff_list
+    st.session_state["_staff_cache"] = staff_list
+
+# ──────────────────────────────────────────────
+# Notion APIによる活動ログ管理
+# ──────────────────────────────────────────────
+# NotionデータベースID（営業活動ログ）
+NOTION_DB_ID = "4483fbb4-098a-485d-a329-206386c4c588"
+NOTION_API_URL = "https://api.anthropic.com/v1/messages"  # Claude経由は不使用
+
+def _notion_headers() -> dict:
+    """Notion APIヘッダーを生成（SecretsからTokenを取得）"""
+    try:
+        token = st.secrets.get("NOTION_TOKEN", "")
+    except Exception:
+        token = ""
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_activity_logs() -> list:
+    """NotionデータベースからログをすべてAPIで取得"""
+    import requests
+    headers = _notion_headers()
+    if not headers["Authorization"].replace("Bearer ", ""):
+        return []
+    try:
+        logs = []
+        has_more = True
+        cursor = None
+        while has_more:
+            body = {"page_size": 100, "sorts": [{"property": "記録日", "direction": "descending"}]}
+            if cursor:
+                body["start_cursor"] = cursor
+            resp = requests.post(
+                f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query",
+                headers=headers, json=body, timeout=10
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            for page in data.get("results", []):
+                props = page.get("properties", {})
+                def _txt(p): return (props.get(p,{}).get("rich_text",[{}]) or [{}])[0].get("plain_text","") if props.get(p,{}).get("rich_text") else ""
+                def _sel(p): return (props.get(p,{}).get("select") or {}).get("name","")
+                def _date(p): return (props.get(p,{}).get("date") or {}).get("start","")
+                def _title(p): return (props.get(p,{}).get("title",[{}]) or [{}])[0].get("plain_text","")
+                logs.append({
+                    "log_id"   : _txt("log_id"),
+                    "記録日"   : _date("記録日"),
+                    "顧客ID"   : _txt("顧客ID"),
+                    "車両ID"   : _txt("車両ID"),
+                    "登録番号" : _txt("登録番号"),
+                    "担当者"   : _txt("担当者"),
+                    "店舗"     : _txt("店舗"),
+                    "ランク"   : _sel("ランク"),
+                    "提案項目" : _sel("提案項目"),
+                    "フェーズ" : _sel("フェーズ"),
+                    "車検満了日": _date("車検満了日"),
+                    "備考"     : _txt("備考"),
+                    "提案内容" : _title("提案内容"),
+                    "_page_id" : page.get("id",""),
+                })
+            has_more = data.get("has_more", False)
+            cursor = data.get("next_cursor")
+        return logs
+    except Exception as e:
+        return []
+
+def save_activity_log(log: dict) -> bool:
+    """活動ログをNotion Databaseに1件保存（複数拠点対応）"""
+    import requests
+    headers = _notion_headers()
+    if not headers["Authorization"].replace("Bearer ", ""):
+        st.warning("⚠️ Notion APIトークンが設定されていません。SecretsにNOTION_TOKENを設定してください。")
+        return False
+    try:
+        # 登録番号を正規化
+        if "登録番号" in log:
+            log["登録番号"] = normalize_plate(log.get("登録番号", ""))
+
+        # 提案内容タイトルを生成
+        title = f"{log.get('記録日','')} {log.get('提案項目','')} {log.get('フェーズ','')}"
+
+        # フェーズ・提案項目の絵文字を除去（Notionのselectと合わせる）
+        def clean_phase(p):
+            return p.replace(" ⭐","").replace(" 📅","").replace(" ✅","").strip()
+
+        phase_clean = clean_phase(log.get("フェーズ",""))
+        item_clean  = log.get("提案項目","")
+
+        # 車検満了日
+        shaken_date = log.get("車検満了日","")
+        try:
+            pd.Timestamp(shaken_date)
+            shaken_date_ok = shaken_date[:10] if shaken_date else None
+        except Exception:
+            shaken_date_ok = None
+
+        body = {
+            "parent": {"database_id": NOTION_DB_ID},
+            "properties": {
+                "提案内容": {"title": [{"text": {"content": title[:100]}}]},
+                "記録日"  : {"date": {"start": log.get("記録日","")[:10]}},
+                "顧客ID"  : {"rich_text": [{"text": {"content": str(log.get("顧客ID",""))}}]},
+                "車両ID"  : {"rich_text": [{"text": {"content": str(log.get("車両ID",""))}}]},
+                "登録番号": {"rich_text": [{"text": {"content": str(log.get("登録番号",""))}}]},
+                "担当者"  : {"rich_text": [{"text": {"content": str(log.get("担当者",""))}}]},
+                "店舗"    : {"rich_text": [{"text": {"content": str(log.get("店舗",""))}}]},
+                "ランク"  : {"select": {"name": str(log.get("ランク","D"))}},
+                "提案項目": {"select": {"name": item_clean}},
+                "フェーズ": {"select": {"name": phase_clean}},
+                "備考"    : {"rich_text": [{"text": {"content": str(log.get("備考",""))[:200]}}]},
+                "log_id"  : {"rich_text": [{"text": {"content": str(log.get("log_id",""))}}]},
+            }
+        }
+        if shaken_date_ok:
+            body["properties"]["車検満了日"] = {"date": {"start": shaken_date_ok}}
+
+        resp = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers=headers, json=body, timeout=10
+        )
+        if resp.status_code == 200:
+            load_activity_logs.clear()  # キャッシュクリア
+            return True
+        else:
+            st.warning(f"Notion保存エラー: {resp.status_code} {resp.text[:200]}")
+            return False
+    except Exception as e:
+        st.warning(f"ログ保存エラー: {e}")
+        return False
+
+def get_latest_log(cust_id: str, veh_id: str) -> dict:
+    """顧客IDと車両IDで最新の活動ログを取得"""
+    logs = load_activity_logs()
+    matched = [l for l in logs
+               if l.get("顧客ID")==str(cust_id) and l.get("車両ID")==str(veh_id)]
+    if matched:
+        return sorted(matched, key=lambda x: x.get("記録日",""), reverse=True)[0]
+    return {}
+
+def logs_to_df(logs: list) -> pd.DataFrame:
+    """ログリストをDataFrameに変換"""
+    if not logs:
+        return pd.DataFrame(columns=["記録日","顧客ID","車両ID","登録番号",
+                                      "担当者","店舗","ランク","提案項目",
+                                      "フェーズ","車検満了日","備考"])
+    return pd.DataFrame(logs)
+
 
 # ──────────────────────────────────────────────
 # GoogleドライブファイルID定義（Streamlit Cloud用）
@@ -263,7 +489,12 @@ GDRIVE_IDS_LTV = {
     "自動車販売.csv"                 : "1iKwaN3AK_XmVqpvXNupBlF10Apgkw4d6",
     "Reservation.csv"               : "1qUHPbUHusS40jT0nAcNaaY2vEo0AfT7i",
     "保険.csv"                      : "",  # 作成後に設定
+    "staff_master.csv"              : "",  # 担当者マスター（設定後に記入）
 }
+
+# Googleドライブ上の担当者マスターCSVファイルID
+# ※ GoogleドライブにCSVをアップロードしてIDを設定してください
+GDRIVE_STAFF_ID = ""  # ← 設定後にファイルIDを記入
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_gdrive_csv(file_id: str, name: str) -> pd.DataFrame:
@@ -408,6 +639,78 @@ with st.sidebar:
     st.caption("※ランクは顧客ID単位で判定します")
     # 旧ロジック互換（フォールバック用）
     thresholds = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 0}
+
+    # ── 担当者マスター管理 ──
+    st.markdown("---")
+    st.markdown("### 👤 担当者マスター")
+    staff_list = load_staff_master()
+
+    # Googleドライブ設定状況を表示
+    if GDRIVE_STAFF_ID:
+        st.markdown('<div style="background:#eff6ff;border:1px solid #93c5fd;border-radius:6px;padding:0.4rem 0.8rem;font-size:0.78rem;color:#1e40af;">☁️ Googleドライブから読み込み中</div>', unsafe_allow_html=True)
+    else:
+        st.caption("💡 staff_master.csvをGoogleドライブにアップロードしてIDを設定するとCSVで一括管理できます")
+
+    with st.expander("担当者を追加・削除（アプリ内）", expanded=False):
+        st.caption("Googleドライブ未設定時または追加分の管理に使用")
+        new_staff = st.text_input("担当者名", key="new_staff_input", placeholder="例：佐藤")
+        ca, cd = st.columns(2)
+        with ca:
+            if st.button("➕ 追加", use_container_width=True, key="add_staff"):
+                name = new_staff.strip()
+                if name and name not in staff_list:
+                    staff_list.append(name)
+                    save_staff_master(staff_list)
+                    st.session_state["_staff_cache"] = None
+                    st.rerun()
+        with cd:
+            del_t = st.selectbox("削除対象", ["─"]+staff_list, key="del_staff_sel")
+            if st.button("🗑️ 削除", use_container_width=True, key="del_staff_btn"):
+                if del_t != "─":
+                    staff_list = [s for s in staff_list if s != del_t]
+                    save_staff_master(staff_list)
+                    st.session_state["_staff_cache"] = None
+                    st.rerun()
+        st.caption(f"現在の担当者：{' / '.join(staff_list) if staff_list else '未登録'}")
+
+        # 担当者CSVダウンロード（Googleドライブ用テンプレート）
+        if staff_list:
+            import io as _io
+            df_staff_dl = pd.DataFrame(staff_list, columns=["担当者名"])
+            buf_staff = _io.BytesIO()
+            df_staff_dl.to_csv(buf_staff, index=False, header=False, encoding="utf-8-sig")
+            st.download_button(
+                "📥 staff_master.csvダウンロード（Googleドライブ用）",
+                buf_staff.getvalue(),
+                "staff_master.csv",
+                "text/csv",
+                use_container_width=True,
+                key="dl_staff"
+            )
+
+    # ── 活動ログ管理 ──
+    st.markdown("---")
+    st.markdown("### 📊 活動ログ")
+    if st.button("🔄 ログを読み込む", use_container_width=True, key="reload_logs_btn"):
+        load_activity_logs.clear()
+        st.rerun()
+    logs_all = load_activity_logs()
+    st.caption(f"累計記録件数：{len(logs_all):,}件（Notionデータベース）")
+    if st.button("📥 CSVダウンロード", use_container_width=True, key="dl_logs_btn"):
+        if logs_all:
+            df_log_dl = logs_to_df(logs_all)
+            buf_log = BytesIO()
+            df_log_dl.to_csv(buf_log, index=False, encoding="utf-8-sig")
+            st.download_button(
+                "⬇️ ダウンロード実行",
+                buf_log.getvalue(),
+                f"activity_log_{datetime.today().strftime('%Y%m%d')}.csv",
+                "text/csv",
+                use_container_width=True,
+                key="dl_logs_exec"
+            )
+        else:
+            st.info("まだ活動ログがありません（NOTION_TOKENが設定されているか確認してください）")
 
     st.markdown("---")
     st.markdown("### 読込状況")
@@ -969,7 +1272,7 @@ stores = sorted(df_master["入庫店舗ID"].dropna().unique())
 # ══════════════════════════════════════════════
 # タブ
 # ══════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab_kpi = st.tabs([
     "📋 本日の接客指示",
     "📊 全体ダッシュボード",
     "📅 月別取引推移",
@@ -977,6 +1280,7 @@ tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🏪 店舗別達成状況",
     "🏆 顧客ランク一覧",
     "📈 生涯顧客ストーリー",
+    "🎯 営業KPI",
 ])
 
 
@@ -1289,7 +1593,7 @@ with tab0:
             st.markdown('<div class="sec">本日 全来店予定一覧（予約時刻順）</div>', unsafe_allow_html=True)
 
             # 時刻順にソート → 同時刻内はランク順
-            rank_order_map = {"S": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+            rank_order_map = {"SSS": 0, "S": 1, "A": 2, "B": 3, "C": 4, "D": 5}
             if "ランク" in df_today.columns:
                 df_today["ランク順"] = df_today["ランク"].map(rank_order_map).fillna(5)
             else:
@@ -1391,6 +1695,175 @@ with tab0:
 </div>
 </div>
 """, unsafe_allow_html=True)
+
+                # ── 前回提案履歴の表示 ──
+                cust_id_str = str(row.get("顧客ID", ""))
+                veh_id_str  = str(row.get("車両ID", ""))
+                prev_log = get_latest_log(cust_id_str, veh_id_str) if cust_id_str else {}
+                if prev_log:
+                    prev_phase = prev_log.get("フェーズ", "")
+                    prev_item  = prev_log.get("提案項目", "")
+                    prev_date  = prev_log.get("記録日", "")
+                    prev_staff = prev_log.get("担当者", "")
+                    is_followup = "興味あり" in prev_phase or "仮予約" in prev_phase
+                    bg_prev = "#fef3c7" if is_followup else "#f0fdf4"
+                    icon_prev = "⭐" if is_followup else "🗂️"
+                    st.markdown(f"""
+<div style="background:{bg_prev};border-radius:6px;padding:0.3rem 0.8rem;margin-top:0.3rem;font-size:0.78rem;">
+  {icon_prev} <strong>前回提案({prev_date} 担当:{prev_staff})</strong>：
+  {prev_item} → <span style="font-weight:700;">{prev_phase}</span>
+  {'　<span style="color:#d97706;font-weight:700;">▶ 今回フォローアップを！</span>' if is_followup else ''}
+</div>
+""", unsafe_allow_html=True)
+
+                # ── 顧客詳細情報（PC画面で確認できるよう全表示）──
+                with st.expander("🔍 顧客詳細情報", expanded=False):
+                    d1, d2, d3 = st.columns(3)
+                    with d1:
+                        st.markdown(f"**顧客ID：** {cust_id_str}")
+                        st.markdown(f"**車両ID：** {veh_id_str}")
+                        st.markdown(f"**登録番号：** {row.get('登録番号','─')}")
+                        st.markdown(f"**ランク：** {rank}")
+                        st.markdown(f"**車検残日数：** {exp_days}日" if exp_days else "**車検残日数：** ─")
+                    with d2:
+                        st.markdown(f"**取引サービス数：** {row.get('取引サービス数','─')}")
+                        st.markdown(f"**経過年数：** {str(row.get('経過年数_tuple','─'))[:10]}")
+                        st.markdown(f"**車検満了日：** {str(row.get('車検満了日','─'))[:10]}")
+                        st.markdown(f"**初年度登録：** {str(row.get('初年度登録','─'))[:10]}")
+                    with d3:
+                        st.markdown(f"**入庫店舗：** {nyuko}")
+                        st.markdown(f"**車検予約：** {shaken_status}")
+                    # 取引済みサービス一覧
+                    st.markdown("**取引済みサービス：**")
+                    svc_marks = []
+                    for svc in all_services:
+                        col_k = f"取引_{svc}"
+                        if col_k in row.index:
+                            try:
+                                v = int(float(row[col_k]))
+                                svc_marks.append(f"{'✅' if v else '─'} {svc}")
+                            except:
+                                svc_marks.append(f"─ {svc}")
+                    if svc_marks:
+                        sc1, sc2, sc3 = st.columns(3)
+                        for si, sm in enumerate(svc_marks):
+                            [sc1, sc2, sc3][si % 3].markdown(sm)
+                    st.markdown(f"**未取引サービス：** {row.get('未取引サービス','─')}")
+                    st.markdown(f"**接客指示：** {row.get('接客指示','通常対応')}")
+
+                # ── 活動記録ボタン ──
+                act_key = f"act_{veh_id_str}_{_}"
+                with st.expander("📝 活動記録", expanded=False):
+                    staff_list_card = load_staff_master()
+
+                    # フルナンバー入力（登録番号が不完全な場合）
+                    reg_no_display = str(row.get("登録番号", "")).strip()
+                    is_incomplete = len(reg_no_display.replace(" ","")) < 6
+                    if is_incomplete:
+                        st.warning("⚠️ 登録番号が不完全です。フルナンバーを入力してください。")
+                    full_plate_input = st.text_input(
+                        "登録番号（フルナンバー）",
+                        value=reg_no_display if not is_incomplete else "",
+                        key=f"plate_{act_key}",
+                        placeholder="例：千葉480て9579",
+                        help="全角・半角・スペースありでも自動正規化します"
+                    )
+
+                    col_s1, col_s2 = st.columns([1, 2])
+                    with col_s1:
+                        # 予測変換（部分一致フィルタ）
+                        staff_input = st.text_input("担当者", key=f"staff_{act_key}",
+                                                     placeholder="名前を入力")
+                        filtered_staff = [s for s in staff_list_card
+                                          if staff_input.lower() in s.lower()] if staff_input else staff_list_card
+                        staff_sel = st.selectbox("候補", filtered_staff or ["─"],
+                                                  key=f"staff_sel_{act_key}")
+                    with col_s2:
+                        # 車検フェーズ（車検未予約の場合のみ）
+                        shaken_status_now = str(row.get("車検予約状況_最新", "予約なし"))
+                        if shaken_status_now not in ["車検予約済"]:
+                            st.markdown("**🔑 車検提案フェーズ**")
+                            shaken_phase_sel = st.radio(
+                                "車検",
+                                options=list(SHAKEN_PHASES.values()),
+                                index=0,
+                                key=f"shaken_{act_key}",
+                                horizontal=True,
+                            )
+                        else:
+                            shaken_phase_sel = "本予約 ✅"
+
+                    # サービス別フェーズ（未取引サービスのみ表示）
+                    untreated_svcs = [s.strip() for s in
+                                      str(row.get("未取引サービス","")).split("、") if s.strip()]
+                    svc_phases = {}
+                    if untreated_svcs:
+                        st.markdown("**💡 サービス提案フェーズ**")
+                        svc_cols = st.columns(min(len(untreated_svcs), 3))
+                        for si, svc in enumerate(untreated_svcs):
+                            if svc == "車検":
+                                continue
+                            with svc_cols[si % 3]:
+                                svc_phases[svc] = st.radio(
+                                    svc,
+                                    options=list(SERVICE_PHASES.values()),
+                                    index=0,
+                                    key=f"svc_{act_key}_{si}",
+                                )
+
+                    memo_input = st.text_input("備考（任意）", key=f"memo_{act_key}",
+                                               placeholder="次回への申し送り等")
+
+                    if st.button("💾 保存", key=f"save_{act_key}", type="primary",
+                                 use_container_width=True):
+                        today_log_date = datetime.today().strftime("%Y/%m/%d")
+                        staff_name = staff_sel if staff_sel != "─" else staff_input
+                        shaken_expiry = str(row.get("車検満了日", ""))
+
+                        # 登録番号を正規化（フルナンバー入力対応）
+                        reg_no_raw = str(row.get("登録番号", ""))
+                        # フルナンバーが未入力の場合は入力欄から取得
+                        if full_plate_input.strip():
+                            reg_no_save = normalize_plate(full_plate_input)
+                        else:
+                            reg_no_save = normalize_plate(reg_no_raw)
+
+                        # 車検ログ保存
+                        if shaken_status_now not in ["車検予約済"]:
+                            save_activity_log({
+                                "log_id"   : str(uuid.uuid4())[:8],
+                                "記録日"   : today_log_date,
+                                "顧客ID"   : cust_id_str,
+                                "車両ID"   : veh_id_str,
+                                "登録番号" : reg_no_save,
+                                "担当者"   : staff_name,
+                                "店舗"     : str(row.get("入庫店舗ID", "")),
+                                "ランク"   : str(row.get("ランク", "")),
+                                "提案項目" : "車検",
+                                "フェーズ" : shaken_phase_sel,
+                                "車検満了日": shaken_expiry,
+                                "備考"     : memo_input,
+                            })
+
+                        # サービス別ログ保存
+                        for svc, phase in svc_phases.items():
+                            if phase != "─ 未記録":
+                                save_activity_log({
+                                    "log_id"   : str(uuid.uuid4())[:8],
+                                    "記録日"   : today_log_date,
+                                    "顧客ID"   : cust_id_str,
+                                    "車両ID"   : veh_id_str,
+                                    "登録番号" : reg_no_save,
+                                    "担当者"   : staff_name,
+                                    "店舗"     : str(row.get("入庫店舗ID", "")),
+                                    "ランク"   : str(row.get("ランク", "")),
+                                    "提案項目" : svc,
+                                    "フェーズ" : phase,
+                                    "車検満了日": "",
+                                    "備考"     : memo_input,
+                                })
+                        st.success("✅ 保存しました")
+                        st.rerun()
 
             # ── CSV ダウンロード ──
             st.markdown("")
@@ -2402,6 +2875,154 @@ with tab6:
 「月別取引推移」と「予約取得台数の推移」を同時に見ることで、3か月後の売上を先読みできる。
 </p>
 </div>""", unsafe_allow_html=True)
+
+
+# ── TAB KPI：営業活動KPIダッシュボード ──────────────────────
+with tab_kpi:
+    st.markdown('<div class="sec">🎯 営業活動KPIダッシュボード</div>', unsafe_allow_html=True)
+
+    kpi_logs = load_activity_logs()
+
+    if not kpi_logs:
+        st.info("まだ活動ログがありません。「本日の接客指示」タブから活動記録を入力してください。")
+    else:
+        df_kpi = logs_to_df(kpi_logs)
+        df_kpi["記録日"] = pd.to_datetime(df_kpi["記録日"], errors="coerce")
+        df_kpi["フェーズ番号"] = df_kpi["フェーズ"].map({
+            "─ 未記録":0,"提案できなかった":1,"提案した":2,
+            "興味あり ⭐":3,"仮予約 📅":4,"本予約 ✅":5,"売れた ✅":4
+        }).fillna(0).astype(int)
+
+        today_dt = pd.Timestamp(datetime.today().date())
+        this_month = today_dt.to_period("M")
+
+        # 期間フィルタ
+        kpi_period = st.radio("期間", ["本日", "今月", "全期間"], horizontal=True, key="kpi_period")
+        if kpi_period == "本日":
+            df_kpi_f = df_kpi[df_kpi["記録日"].dt.date == today_dt.date()]
+        elif kpi_period == "今月":
+            df_kpi_f = df_kpi[df_kpi["記録日"].dt.to_period("M") == this_month]
+        else:
+            df_kpi_f = df_kpi.copy()
+
+        # 店舗・担当者フィルタ
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            stores_kpi = ["全店舗"] + sorted(df_kpi_f["店舗"].dropna().unique().tolist())
+            sel_store_kpi = st.selectbox("店舗", stores_kpi, key="kpi_store")
+        with col_f2:
+            staffs_kpi = ["全担当者"] + sorted(df_kpi_f["担当者"].dropna().unique().tolist())
+            sel_staff_kpi = st.selectbox("担当者", staffs_kpi, key="kpi_staff")
+
+        if sel_store_kpi != "全店舗":
+            df_kpi_f = df_kpi_f[df_kpi_f["店舗"] == sel_store_kpi]
+        if sel_staff_kpi != "全担当者":
+            df_kpi_f = df_kpi_f[df_kpi_f["担当者"] == sel_staff_kpi]
+
+        # ── KPIサマリー ──
+        st.markdown("### 📊 KPIサマリー")
+        total_act   = len(df_kpi_f[df_kpi_f["フェーズ番号"] >= 2])  # 提案した以上
+        total_kyomi = len(df_kpi_f[df_kpi_f["フェーズ番号"] >= 3])  # 興味あり以上
+        total_kari  = len(df_kpi_f[df_kpi_f["フェーズ"].str.contains("仮予約", na=False)])
+        total_hon   = len(df_kpi_f[df_kpi_f["フェーズ"].str.contains("本予約|売れた", na=False)])
+        conv_rate   = total_kyomi / total_act * 100 if total_act > 0 else 0
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("提案件数", f"{total_act:,}件")
+        k2.metric("興味あり", f"{total_kyomi:,}件")
+        k3.metric("仮予約", f"{total_kari:,}件")
+        k4.metric("本予約・成約", f"{total_hon:,}件")
+        k5.metric("転換率", f"{conv_rate:.1f}%", help="興味あり÷提案件数")
+
+        st.markdown("---")
+
+        # ── 提案項目別集計 ──
+        st.markdown("### 🔍 提案項目別 結果")
+        if len(df_kpi_f) > 0:
+            item_summary = df_kpi_f.groupby("提案項目").agg(
+                提案件数=("フェーズ番号", lambda x: (x >= 2).sum()),
+                興味あり=("フェーズ番号", lambda x: (x >= 3).sum()),
+                成約=("フェーズ番号", lambda x: (x >= 4).sum()),
+            ).reset_index()
+            item_summary["転換率"] = (
+                item_summary["興味あり"] / item_summary["提案件数"].replace(0,1) * 100
+            ).round(1).astype(str) + "%"
+            item_summary = item_summary[item_summary["提案件数"] > 0].sort_values("提案件数", ascending=False)
+            st.dataframe(item_summary, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        # ── 担当者別集計 ──
+        st.markdown("### 👤 担当者別 実績")
+        if len(df_kpi_f) > 0:
+            staff_summary = df_kpi_f.groupby("担当者").agg(
+                提案件数=("フェーズ番号", lambda x: (x >= 2).sum()),
+                興味あり=("フェーズ番号", lambda x: (x >= 3).sum()),
+                成約=("フェーズ番号", lambda x: (x >= 4).sum()),
+            ).reset_index()
+            staff_summary["転換率"] = (
+                staff_summary["興味あり"] / staff_summary["提案件数"].replace(0,1) * 100
+            ).round(1).astype(str) + "%"
+            staff_summary = staff_summary[staff_summary["提案件数"] > 0].sort_values("提案件数", ascending=False)
+            st.dataframe(staff_summary, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        # ── 担当者別詳細実績 ──
+        st.markdown("### 👤 担当者別 詳細実績")
+        if len(df_kpi_f) > 0:
+            staff_detail = df_kpi_f.groupby(["担当者","提案項目"]).agg(
+                提案=("フェーズ番号", lambda x: (x >= 2).sum()),
+                興味あり=("フェーズ番号", lambda x: (x >= 3).sum()),
+                成約=("フェーズ番号", lambda x: (x >= 4).sum()),
+            ).reset_index()
+            staff_detail = staff_detail[staff_detail["提案"] > 0]
+            staff_detail["転換率"] = (
+                staff_detail["興味あり"] / staff_detail["提案"].replace(0,1) * 100
+            ).round(1).astype(str) + "%"
+
+            # 担当者別に折り畳み表示
+            for staff_name_kpi in staff_detail["担当者"].unique():
+                df_s = staff_detail[staff_detail["担当者"]==staff_name_kpi]
+                total_p  = df_s["提案"].sum()
+                total_k  = df_s["興味あり"].sum()
+                total_s  = df_s["成約"].sum()
+                with st.expander(f"👤 {staff_name_kpi}　提案{total_p}件 / 興味あり{total_k}件 / 成約{total_s}件"):
+                    st.dataframe(df_s[["提案項目","提案","興味あり","成約","転換率"]],
+                                 use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        # ── 車検フォローアップリスト ──
+        st.markdown("### 📋 車検フォローアップリスト（興味あり・仮予約）")
+        df_followup = df_kpi[
+            (df_kpi["提案項目"] == "車検") &
+            (df_kpi["フェーズ"].str.contains("興味あり|仮予約", na=False))
+        ].copy()
+
+        if len(df_followup) > 0:
+            df_followup["車検満了日_dt"] = pd.to_datetime(df_followup["車検満了日"], errors="coerce")
+            df_followup["満了まで"] = (df_followup["車検満了日_dt"] - today_dt).dt.days
+            df_followup["アクション推奨"] = df_followup["満了まで"].apply(
+                lambda d: "🔴 今すぐ連絡" if pd.notna(d) and d <= 90
+                else ("⚠️ 3ヶ月以内に連絡" if pd.notna(d) and d <= 180 else "📅 継続フォロー")
+            )
+            show_cols = ["記録日","顧客ID","車両ID","担当者","フェーズ","車検満了日","満了まで","アクション推奨","備考"]
+            show_cols = [c for c in show_cols if c in df_followup.columns]
+            st.dataframe(df_followup[show_cols].sort_values("満了まで"), use_container_width=True, hide_index=True)
+
+            # CSVエクスポート（営業リスト用）
+            buf_fu = BytesIO()
+            df_followup[show_cols].to_csv(buf_fu, index=False, encoding="utf-8-sig")
+            st.download_button(
+                "📥 フォローアップリストCSVダウンロード（予約システム取込用）",
+                buf_fu.getvalue(),
+                f"followup_shaken_{datetime.today().strftime('%Y%m%d')}.csv",
+                "text/csv",
+                use_container_width=True,
+            )
+        else:
+            st.info("車検で「興味あり」または「仮予約」のログがまだありません")
 
 
 # ──────────────────────────────────────────────
