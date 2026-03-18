@@ -316,10 +316,16 @@ data_dir_exists = DATA_DIR.exists()
 
 with st.sidebar:
     # ── データ読込モード表示 ──
+    _gdrive_ready = bool(GDRIVE_IDS_LTV.get("Master_Data.csv"))
     if data_dir_exists and auto_master_path:
         st.markdown('''<div style="background:#ecfdf5;border:1px solid #6ee7b7;border-radius:8px;
         padding:0.5rem 0.8rem;font-size:0.78rem;color:#065f46;margin-bottom:0.5rem;">
         📁 <strong>自動読込モード</strong>：dataフォルダのCSVを検出しました
+        </div>''', unsafe_allow_html=True)
+    elif _gdrive_ready:
+        st.markdown('''<div style="background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;
+        padding:0.5rem 0.8rem;font-size:0.78rem;color:#1e40af;margin-bottom:0.5rem;">
+        ☁️ <strong>Googleドライブ読込モード</strong>：クラウドからデータを自動取得します
         </div>''', unsafe_allow_html=True)
     else:
         st.markdown('''<div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;
@@ -401,8 +407,12 @@ with st.sidebar:
 # ──────────────────────────────────────────────
 # サンプルCSV生成
 # ──────────────────────────────────────────────
-# ── マスターデータの決定（手動アップロード優先 > dataフォルダ自動読込）──
-_has_master = f_master is not None or auto_master_path is not None
+# ── マスターデータの決定（手動アップロード優先 > dataフォルダ > Googleドライブ）──
+_has_master = (
+    f_master is not None
+    or auto_master_path is not None
+    or bool(GDRIVE_IDS_LTV.get("Master_Data.csv"))  # GoogleドライブIDが設定済み
+)
 
 if not _has_master:
     st.info("CSVが見つかりません。以下のいずれかの方法でデータを読み込んでください。")
