@@ -416,17 +416,12 @@ def save_activity_log(log: dict) -> bool:
 
         # 車検満了日
         shaken_date = log.get("車検満了日","")
-        try:
-            pd.Timestamp(shaken_date)
-            shaken_date_ok = shaken_date[:10] if shaken_date else None
-        except Exception:
-            shaken_date_ok = None
 
         body = {
             "parent": {"database_id": NOTION_DB_ID},
             "properties": {
                 "提案内容": {"title": [{"text": {"content": title[:100]}}]},
-                "記録日"  : {"date": {"start": log.get("記録日","")[:10]}},
+                "記録日"  : {"date": {"start": str(log.get("記録日",""))[:10].replace("/","-")}},
                 "顧客ID"  : {"rich_text": [{"text": {"content": str(log.get("顧客ID",""))}}]},
                 "車両ID"  : {"rich_text": [{"text": {"content": str(log.get("車両ID",""))}}]},
                 "登録番号": {"rich_text": [{"text": {"content": str(log.get("登録番号",""))}}]},
@@ -439,8 +434,9 @@ def save_activity_log(log: dict) -> bool:
                 "log_id"  : {"rich_text": [{"text": {"content": str(log.get("log_id",""))}}]},
             }
         }
-        if shaken_date_ok:
-            body["properties"]["車検満了日"] = {"date": {"start": shaken_date_ok}}
+        shaken_date_iso = str(shaken_date or "")[:10].replace("/", "-") if shaken_date else None
+        if shaken_date_iso and len(shaken_date_iso) == 10:
+            body["properties"]["車検満了日"] = {"date": {"start": shaken_date_iso}}
 
         resp = requests.post(
             "https://api.notion.com/v1/pages",
@@ -661,16 +657,14 @@ with st.sidebar:
                 if name and name not in staff_list:
                     staff_list.append(name)
                     save_staff_master(staff_list)
-                    st.session_state["_staff_cache"] = None
-                    st.rerun()
+                    st.success(f"追加しました：{name}")
         with cd:
             del_t = st.selectbox("削除対象", ["─"]+staff_list, key="del_staff_sel")
             if st.button("🗑️ 削除", use_container_width=True, key="del_staff_btn"):
                 if del_t != "─":
                     staff_list = [s for s in staff_list if s != del_t]
                     save_staff_master(staff_list)
-                    st.session_state["_staff_cache"] = None
-                    st.rerun()
+                    st.success(f"削除しました：{del_t}")
         st.caption(f"現在の担当者：{' / '.join(staff_list) if staff_list else '未登録'}")
 
         # 担当者CSVダウンロード（Googleドライブ用テンプレート）
@@ -1814,23 +1808,25 @@ with tab0:
                     memo_input = st.text_input("備考（任意）", key=f"memo_{act_key}",
                                                placeholder="次回への申し送り等")
 
-                    if st.button("💾 保存", key=f"save_{act_key}", type="primary",
-                                 use_container_width=True):
-                        today_log_date = datetime.today().strftime("%Y/%m/%d")
+                    # 保存済みフラグ（セッション内で管理・rerun不要）
+                    saved_key = f"saved_{act_key}"
+                    if st.session_state.get(saved_key):
+                        st.success("✅ 保存済み")
+                    elif st.button("💾 保存", key=f"save_{act_key}", type="primary",
+                                   use_container_width=True):
+                        today_log_date = datetime.today().strftime("%Y-%m-%d")
                         staff_name = staff_sel if staff_sel != "─" else staff_input
                         shaken_expiry = str(row.get("車検満了日", ""))
 
                         # 登録番号を正規化（フルナンバー入力対応）
                         reg_no_raw = str(row.get("登録番号", ""))
-                        # フルナンバーが未入力の場合は入力欄から取得
-                        if full_plate_input.strip():
-                            reg_no_save = normalize_plate(full_plate_input)
-                        else:
-                            reg_no_save = normalize_plate(reg_no_raw)
+                        reg_no_save = normalize_plate(full_plate_input) if full_plate_input.strip() else normalize_plate(reg_no_raw)
+
+                        saved_count = 0
 
                         # 車検ログ保存
                         if shaken_status_now not in ["車検予約済"]:
-                            save_activity_log({
+                            ok = save_activity_log({
                                 "log_id"   : str(uuid.uuid4())[:8],
                                 "記録日"   : today_log_date,
                                 "顧客ID"   : cust_id_str,
@@ -1844,11 +1840,12 @@ with tab0:
                                 "車検満了日": shaken_expiry,
                                 "備考"     : memo_input,
                             })
+                            if ok: saved_count += 1
 
                         # サービス別ログ保存
                         for svc, phase in svc_phases.items():
                             if phase != "─ 未記録":
-                                save_activity_log({
+                                ok = save_activity_log({
                                     "log_id"   : str(uuid.uuid4())[:8],
                                     "記録日"   : today_log_date,
                                     "顧客ID"   : cust_id_str,
@@ -1862,8 +1859,14 @@ with tab0:
                                     "車検満了日": "",
                                     "備考"     : memo_input,
                                 })
-                        st.success("✅ 保存しました")
-                        st.rerun()
+                                if ok: saved_count += 1
+
+                        if saved_count > 0:
+                            # 保存成功：セッションにフラグを立てるだけ（rerun不要）
+                            st.session_state[saved_key] = True
+                            st.success(f"✅ {saved_count}件をNotionに保存しました")
+                        else:
+                            st.error("保存に失敗しました。NOTION_TOKENを確認してください。")
 
             # ── CSV ダウンロード ──
             st.markdown("")
