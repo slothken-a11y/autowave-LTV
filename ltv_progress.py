@@ -364,11 +364,15 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 読込状況")
 
+    _gd = GDRIVE_IDS_LTV  # 短縮参照
+
     # マスター
     if f_master:
         st.markdown('<div class="upload-status upload-ok">✅ マスター（手動アップロード）</div>', unsafe_allow_html=True)
     elif auto_master_path:
         st.markdown(f'<div class="upload-status upload-ok">📁 マスター：{auto_master_path.name}</div>', unsafe_allow_html=True)
+    elif _gd.get("Master_Data.csv"):
+        st.markdown('<div class="upload-status upload-ok">☁️ マスター（Googleドライブ）</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="upload-status upload-wait">⏳ マスターデータ（未検出）</div>', unsafe_allow_html=True)
 
@@ -380,15 +384,24 @@ with st.sidebar:
         for p in auto_txn_paths:
             st.markdown(f'<div class="upload-status upload-ok">📁 {p.name}</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="upload-status upload-wait">⏳ 取引CSV（未検出）</div>', unsafe_allow_html=True)
+        # Googleドライブの取引CSV件数を表示
+        gdrive_txn_count = sum(1 for k, v in _gd.items()
+            if v and k not in ("Master_Data.csv", "Reservation.csv", "保険.csv"))
+        if gdrive_txn_count > 0:
+            st.markdown(f'<div class="upload-status upload-ok">☁️ 取引CSV：{gdrive_txn_count}ファイル（Googleドライブ）</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="upload-status upload-wait">⏳ 取引CSV（未検出）</div>', unsafe_allow_html=True)
 
     # 予約
     if f_rsv:
         st.markdown('<div class="upload-status upload-ok">✅ 予約データ（手動アップロード）</div>', unsafe_allow_html=True)
     elif auto_rsv_path:
         st.markdown(f'<div class="upload-status upload-ok">📁 予約：{auto_rsv_path.name}</div>', unsafe_allow_html=True)
+    elif _gd.get("Reservation.csv"):
+        st.markdown('<div class="upload-status upload-ok">☁️ 予約データ（Googleドライブ）</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="upload-status upload-wait">⏳ 予約データ（未検出）</div>', unsafe_allow_html=True)
+
     # 仮予約
     if f_kari:
         st.markdown('<div class="upload-status upload-ok">✅ 仮予約データ（手動アップロード）</div>', unsafe_allow_html=True)
@@ -401,7 +414,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption(f"📁 dataフォルダ：{DATA_DIR}")
     if not data_dir_exists:
-        st.caption("⚠️ dataフォルダが存在しません。作成してCSVを配置してください。")
+        st.caption("☁️ Googleドライブからデータを読み込みます")
 
 
 # ──────────────────────────────────────────────
