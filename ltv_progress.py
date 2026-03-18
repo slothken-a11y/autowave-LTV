@@ -1110,7 +1110,10 @@ if "顧客ID" in df_master.columns:
     # 顧客単位のランク付け
     cust_df["ランク"] = cust_df.apply(assign_rank_customer, axis=1)
 
-    # マスターに顧客ランクをマージ
+    # マスターに顧客ランクをマージ（重複列を事前に除去）
+    for drop_col in ["ランク", "粗利LTV_顧客", "売上LTV_顧客"]:
+        if drop_col in df_master.columns:
+            df_master.drop(columns=[drop_col], inplace=True)
     df_master = df_master.merge(
         cust_df[["顧客ID", "ランク", "粗利LTV_顧客", "売上LTV_顧客"]],
         on="顧客ID", how="left"
@@ -1350,22 +1353,36 @@ with tab0:
         if target_store != "全店舗" and "入庫店舗ID" in df_today.columns:
             df_today = df_today[df_today["入庫店舗ID"] == target_store]
 
-        # マスター情報を結合
-        # 予約データの「入庫店舗ID」（実際の入庫店舗）を優先するため
-        # マスター側の「入庫店舗ID」は「拠点店舗ID」として取り込む
+        # マスター情報を結合（登録番号を正規化してから突合）
         if "登録番号" in df_today.columns and "登録番号" in df_master.columns:
-            master_cols = ["登録番号", "顧客ID", "車両ID", "入庫店舗ID",
+            # 予約側の登録番号を正規化
+            df_today["登録番号_norm"] = df_today["登録番号"].astype(str).apply(normalize_plate)
+
+            # マスター側も正規化済み列を作成
+            df_master_tmp = df_master.copy()
+            df_master_tmp["登録番号_norm"] = df_master_tmp["登録番号"].astype(str).apply(normalize_plate)
+
+            master_cols = ["登録番号_norm", "顧客ID", "車両ID", "入庫店舗ID",
                            "ランク", "取引サービス数", "未取引サービス", "車検満了日",
-                           "初年度登録"] + \
-                          [f"取引_{s}" for s in all_services]
-            master_cols = [c for c in master_cols if c in df_master.columns]
+                           "初年度登録", "粗利LTV_顧客"] +                           [f"取引_{s}" for s in all_services]
+            master_cols = [c for c in master_cols if c in df_master_tmp.columns]
+
+            # マージキーを正規化済み登録番号に変更
             df_today = df_today.merge(
-                df_master[master_cols].rename(columns={"入庫店舗ID": "拠点店舗ID"}),
-                on="登録番号", how="left"
+                df_master_tmp[master_cols].rename(columns={"入庫店舗ID": "拠点店舗ID"}),
+                on="登録番号_norm", how="left"
             )
+            df_today.drop(columns=["登録番号_norm"], errors="ignore", inplace=True)
+
             # 予約データに入庫店舗IDがなければマスターの拠点店舗IDで補完
             if "入庫店舗ID" not in df_today.columns and "拠点店舗ID" in df_today.columns:
                 df_today["入庫店舗ID"] = df_today["拠点店舗ID"]
+
+            # 顧客ID起点ランクが正しくマージされているか確認・フォールバック
+            if "ランク" not in df_today.columns:
+                df_today["ランク"] = "D"
+            else:
+                df_today["ランク"] = df_today["ランク"].fillna("D")
 
         # 車検予約状況を辞書引きで高速付与（applyループを排除）
         if "登録番号" in df_today.columns and "_shaken_dict" in dir():
@@ -1636,16 +1653,17 @@ with tab0:
 
                 # カードの背景色をランク別に
                 bg_color = {
-                    "S": "linear-gradient(135deg,#fffbeb,#fef3c7)",
-                    "A": "linear-gradient(135deg,#eff6ff,#dbeafe)",
-                    "B": "linear-gradient(135deg,#f0fdf4,#dcfce7)",
-                    "C": "#f8fafc",
-                    "D": "#f8fafc",
+                    "SSS": "linear-gradient(135deg,#fff1f2,#fecdd3)",
+                    "S"  : "linear-gradient(135deg,#fffbeb,#fef3c7)",
+                    "A"  : "linear-gradient(135deg,#eff6ff,#dbeafe)",
+                    "B"  : "linear-gradient(135deg,#f0fdf4,#dcfce7)",
+                    "C"  : "#f8fafc",
+                    "D"  : "#f8fafc",
                 }.get(rank, "#f8fafc")
 
                 border_color = {
-                    "S": "#d97706", "A": "#2563eb", "B": "#059669",
-                    "C": "#94a3b8", "D": "#e2e8f0"
+                    "SSS": "#7c2d12", "S": "#d97706", "A": "#2563eb",
+                    "B": "#059669", "C": "#94a3b8", "D": "#e2e8f0"
                 }.get(rank, "#e2e8f0")
 
                 # 予約時刻の取得
