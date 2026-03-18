@@ -202,10 +202,50 @@ def find_col(df, candidates):
 
 
 def assign_rank(n, thr):
+    """旧ロジック互換（サンプルデータ生成等で使用）"""
     for r, t in thr.items():
         if n >= t:
             return r
     return "D"
+
+def assign_rank_customer(cust_row):
+    """
+    顧客ID起点のランク定義（確定版）
+    ─────────────────────────────────
+    SSS：複数台で車検取引あり かつ 自動車販売あり
+    S  ：車検あり かつ 自動車販売あり（1台）
+    A  ：車検あり かつ オイル交換あり かつ タイヤ交換あり
+    B  ：車検あり（A未満）
+    C  ：車検なし かつ メンテ来店あり（オイル/タイヤ/バッテリー/コーティング/ワイパー）
+    D  ：ほぼ未取引
+    """
+    shaken    = cust_row.get("cust_車検", 0) >= 1
+    sales     = cust_row.get("cust_自動車販売", 0) >= 1
+    multi_shaken = cust_row.get("cust_車検台数", 0) >= 2
+    oil       = cust_row.get("cust_オイル交換", 0) >= 1
+    tire      = cust_row.get("cust_タイヤ交換", 0) >= 1
+    maint     = (cust_row.get("cust_オイル交換", 0) +
+                 cust_row.get("cust_タイヤ交換", 0) +
+                 cust_row.get("cust_バッテリー交換", 0) +
+                 cust_row.get("cust_コーティング", 0) +
+                 cust_row.get("cust_ワイパー交換", 0)) >= 1
+
+    if multi_shaken and sales: return "SSS"
+    if shaken and sales:       return "S"
+    if shaken and oil and tire: return "A"
+    if shaken:                 return "B"
+    if maint:                  return "C"
+    return "D"
+
+RANK_LABEL = {
+    "SSS": "🏆SSS：複数台完全囲い込み",
+    "S"  : "🥇S：車検＋乗り換え獲得",
+    "A"  : "🥈A：車検＋来店習慣定着",
+    "B"  : "🥉B：車検定着",
+    "C"  : "C：車検未獲得・メンテ来店",
+    "D"  : "D：ほぼ未取引",
+}
+RANK_ORDER = ["SSS", "S", "A", "B", "C", "D"]
 
 
 # ──────────────────────────────────────────────
@@ -354,12 +394,20 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("### ⚙️ ランク設定（取引サービス種類数）")
-    rank_s = st.slider("Sランク以上", 3, 7, 5, key="rs")
-    rank_a = st.slider("Aランク以上", 2, 6, 4, key="ra")
-    rank_b = st.slider("Bランク以上", 1, 5, 3, key="rb")
-    rank_c = st.slider("Cランク以上", 1, 4, 2, key="rc")
-    thresholds = {"S": rank_s, "A": rank_a, "B": rank_b, "C": rank_c, "D": 0}
+    st.markdown("### ⚙️ ランク定義（顧客ID起点・確定版）")
+    st.markdown("""
+| ランク | 定義 |
+|---|---|
+| 🏆 **SSS** | 複数台車検＋自動車販売 |
+| 🥇 **S** | 車検＋自動車販売 |
+| 🥈 **A** | 車検＋オイル＋タイヤ |
+| 🥉 **B** | 車検あり（A未満） |
+| **C** | 車検なし・メンテ来店 |
+| **D** | ほぼ未取引 |
+""")
+    st.caption("※ランクは顧客ID単位で判定します")
+    # 旧ロジック互換（フォールバック用）
+    thresholds = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 0}
 
     st.markdown("---")
     st.markdown("### 読込状況")
@@ -542,6 +590,31 @@ except Exception as e:
     st.error(f"マスターデータ読み込みエラー: {e}")
     st.stop()
 
+# ── Master_Data 英字列名 → 日本語列名の変換（基幹システム出力形式に対応）──
+MASTER_COL_RENAME = {
+    "SYARYO_ID"    : "車両ID",
+    "TOROKUBANGO"  : "登録番号",
+    "MANRYOBI"     : "車検満了日",
+    "SYARYO_KYOTEN": "入庫店舗ID",
+    "SHONENDO"     : "初年度登録",
+    "TOROKUBI"     : "登録日",
+    "SHAMEI"       : "車名",
+    "TSUSHOMEI"    : "通称名",
+    "KATASHIKI"    : "型式",
+    "KYOTEN_ID"    : "拠点ID",
+}
+df_master.rename(columns={k: v for k, v in MASTER_COL_RENAME.items()
+                           if k in df_master.columns}, inplace=True)
+
+# 初年度登録列の候補（複数の列名に対応）
+shonendo_col = find_col(df_master, ["初年度登録", "SHONENDO", "初年度", "登録年度", "first_year"])
+if shonendo_col and shonendo_col != "初年度登録":
+    df_master.rename(columns={shonendo_col: "初年度登録"}, inplace=True)
+
+# 初年度登録を日付型に変換
+if "初年度登録" in df_master.columns:
+    df_master["初年度登録"] = pd.to_datetime(df_master["初年度登録"], errors="coerce")
+
 df_master["車検満了日"] = pd.to_datetime(df_master["車検満了日"], errors="coerce")
 store_col = find_col(df_master, ["入庫店舗ID", "店舗ID", "店舗"])
 if store_col and store_col != "入庫店舗ID":
@@ -689,18 +762,16 @@ for svc in all_services:
 for col, vals in flag_dict.items():
     df_master[col] = vals
 
-# 取引サービス数をNumPy演算で計算（apply不使用）
+# ── 取引フラグMatrix・LTV計算 ──
 flag_matrix = np.column_stack([df_master[c].values for c in txn_cols])
 df_master["取引サービス数"] = flag_matrix.sum(axis=1).astype(int)
-df_master["ランク"] = df_master["取引サービス数"].apply(lambda n: assign_rank(n, thresholds))
 
-# ── 売上LTV・粗利LTV計算 ──
-sales_arr  = np.array([SERVICE_PRICE.get(s, 0) for s in all_services])
-gross_arr  = np.array([SERVICE_GROSS.get(s, 0) for s in all_services])
+sales_arr = np.array([SERVICE_PRICE.get(s, 0) for s in all_services])
+gross_arr = np.array([SERVICE_GROSS.get(s, 0) for s in all_services])
 df_master["売上LTV"] = flag_matrix.dot(sales_arr).astype(int)
 df_master["粗利LTV"] = flag_matrix.dot(gross_arr).astype(int)
 
-# 未取引サービス列をNumPy演算で生成（apply不使用）
+# 未取引サービス列
 untreated_list = []
 for i in range(len(df_master)):
     row_flags = flag_matrix[i]
@@ -709,8 +780,56 @@ for i in range(len(df_master)):
     )
 df_master["未取引サービス"] = untreated_list
 
-# ── 予約CSV突合（手動優先 > dataフォルダ自動読込）──
-has_rsv = (f_rsv is not None) or (auto_rsv_path is not None)
+# ──────────────────────────────────────────────
+# 顧客ID起点のランク計算（確定版）
+# ──────────────────────────────────────────────
+if "顧客ID" in df_master.columns:
+    # 顧客単位で集計
+    svc_flag_cols = {s: f"取引_{s}" for s in all_services}
+    agg_dict = {"粗利LTV": "sum", "売上LTV": "sum", "取引サービス数": "sum"}
+
+    # 車検台数（顧客単位での車検取引台数）
+    if "取引_車検" in df_master.columns:
+        agg_dict["cust_車検台数"] = ("取引_車検", "sum")
+
+    for svc in all_services:
+        col = f"取引_{svc}"
+        if col in df_master.columns:
+            agg_dict[f"cust_{svc}"] = (col, "max")  # 1台でもあればOK
+
+    cust_df = df_master.groupby("顧客ID").agg(**{
+        k: v if isinstance(v, tuple) else pd.NamedAgg(column=v[0], aggfunc=v[1])
+        if isinstance(v, tuple) else pd.NamedAgg(column=k, aggfunc=v)
+        for k, v in agg_dict.items()
+    }).reset_index() if False else df_master.groupby("顧客ID").agg(
+        粗利LTV_顧客=("粗利LTV", "sum"),
+        売上LTV_顧客=("売上LTV", "sum"),
+        cust_車検台数=("取引_車検", "sum") if "取引_車検" in df_master.columns else ("取引サービス数", "first"),
+        **{f"cust_{s}": (f"取引_{s}", "max") for s in all_services if f"取引_{s}" in df_master.columns},
+    ).reset_index()
+
+    # 顧客単位のランク付け
+    cust_df["ランク"] = cust_df.apply(assign_rank_customer, axis=1)
+
+    # マスターに顧客ランクをマージ
+    df_master = df_master.merge(
+        cust_df[["顧客ID", "ランク", "粗利LTV_顧客", "売上LTV_顧客"]],
+        on="顧客ID", how="left"
+    )
+    df_master["ランク"] = df_master["ランク"].fillna("D")
+    df_master["粗利LTV_顧客"] = df_master["粗利LTV_顧客"].fillna(df_master["粗利LTV"])
+else:
+    # 顧客IDがない場合のフォールバック（車両単位の旧ロジック）
+    df_master["ランク"] = df_master["取引サービス数"].apply(
+        lambda n: assign_rank(n, thresholds))
+    df_master["粗利LTV_顧客"] = df_master["粗利LTV"]
+
+# ── 予約CSV突合（手動優先 > dataフォルダ > Googleドライブ）──
+has_rsv = (
+    (f_rsv is not None)
+    or (auto_rsv_path is not None)
+    or bool(GDRIVE_IDS_LTV.get("Reservation.csv"))  # GoogleドライブIDが設定済み
+)
 df_rsv = None
 if has_rsv:
     try:
@@ -913,7 +1032,8 @@ with tab0:
         # マスター側の「入庫店舗ID」は「拠点店舗ID」として取り込む
         if "登録番号" in df_today.columns and "登録番号" in df_master.columns:
             master_cols = ["登録番号", "顧客ID", "車両ID", "入庫店舗ID",
-                           "ランク", "取引サービス数", "未取引サービス", "車検満了日"] + \
+                           "ランク", "取引サービス数", "未取引サービス", "車検満了日",
+                           "初年度登録"] + \
                           [f"取引_{s}" for s in all_services]
             master_cols = [c for c in master_cols if c in df_master.columns]
             df_today = df_today.merge(
@@ -968,64 +1088,81 @@ with tab0:
 
                 actions = []
 
-                # Sランク専用：最優先対応
-                # 経過年数を取得（generate_action内）
+                # 経過年数を取得
                 reg_date_action = row.get("初年度登録", None)
                 elapsed_action = calc_elapsed(reg_date_action) if reg_col else None
                 elapsed_years_action = elapsed_action[0] if elapsed_action else 0
 
-                if rank == "S":
-                    if days_to_exp is not None and 0 <= days_to_exp <= 180:
-                        actions.append(f"🔴【最優先】車検満期まで{days_to_exp}日。乗り換え相談＋車検予約を獲得する")
-                    else:
-                        actions.append("🌟【Sランク特別対応】担当者が直接挨拶。カーライフ状況をヒアリングし関係を深める")
-                    if "自動車販売" in untreated_list and days_to_exp and days_to_exp <= 365:
-                        actions.append("🚗 乗り換え提案：現在の車の年数・走行距離を確認し次の車を提案する")
-                    # 10年超の場合は乗り換え提案を強調
+                # ── 顧客ID起点ランクに応じた接客指示（確定版）──
+                if rank == "SSS":
+                    actions.append("🏆【VIP対応】担当者が直接挨拶。複数台・家族全体のカーライフをヒアリング")
+                    actions.append("🚗 次の1台・家族の車の相談を自然な会話の中で確認する")
                     if elapsed_years_action >= 10:
-                        actions.append(f"🚨 車齢{elapsed_years_action}年！乗り換えニーズが高い可能性。新車・中古車提案を積極的に")
+                        actions.append(f"🚨 車齢{elapsed_years_action}年！乗り換えニーズ最高。積極的に次の1台を提案する")
 
-                # A・Bランク：クロスセル提案
-                elif rank in ["A", "B"]:
-                    # 車検満期が近い
+                elif rank == "S":
+                    actions.append("🥇【S対応】乗り換えまで獲得した重要顧客。2台目・家族の車検を確認する")
+                    if days_to_exp is not None and 0 <= days_to_exp <= 180:
+                        actions.append(f"🔴 車検満期まで{days_to_exp}日。次の乗り換えタイミングを相談する")
+                    actions.append("💡 「次のオイル交換・12ヶ月点検もぜひ当店で」（来店習慣の強化）")
+                    if elapsed_years_action >= 10:
+                        actions.append(f"🚨 車齢{elapsed_years_action}年！次の乗り換え提案を今日切り出す")
+
+                elif rank == "A":
+                    actions.append("🥈【A対応】来店習慣が定着した顧客。次のステップは乗り換え提案")
                     if days_to_exp is not None and 0 <= days_to_exp <= 90:
                         actions.append(f"⚡ 車検満期まで{days_to_exp}日！本日必ず車検予約を取る")
-                    # 未取引サービスから最優先提案を1つ選ぶ
-                    priority_svcs = ["自動車販売", "コーティング", "タイヤ交換", "バッテリー交換", "12か月点検", "オイル交換"]
-                    for ps in priority_svcs:
-                        if ps in untreated_list:
-                            talk = {
-                                "自動車販売": "「そろそろ乗り換えを考えていませんか？今なら〇〇がおすすめです」",
-                                "コーティング": "「タイヤ（または車検）に合わせてボディもきれいにしませんか？」",
-                                "タイヤ交換": "「タイヤの溝を確認しましたが、次の交換時期が近づいています」",
-                                "バッテリー交換": "「バッテリーの状態を点検しましょうか？交換目安の時期です」",
-                                "12か月点検": "「最後の12か月点検からしばらく経ちますね。今日ついでにどうですか？」",
-                                "オイル交換": "「オイル交換の時期になっています。今日一緒にやりましょう」",
-                            }.get(ps, f"「{ps}はいかがでしょうか？」")
-                            actions.append(f"💡 提案：{ps} ─ {talk}")
-                            break  # 1つだけ
+                    actions.append("🚗 最重要提案：自動車販売「そろそろ乗り換えを考えていませんか？今なら〇〇がおすすめです」")
+                    if elapsed_years_action >= 10:
+                        actions.append(f"🚨 車齢{elapsed_years_action}年！乗り換え提案の絶好のタイミング")
+                    elif elapsed_years_action >= 7:
+                        actions.append(f"⚠️ 車齢{elapsed_years_action}年。乗り換えニーズを探る会話を始める")
 
-                # C・Dランク：接点強化
-                elif rank in ["C", "D"]:
+                elif rank == "B":
                     if days_to_exp is not None and 0 <= days_to_exp <= 90:
-                        actions.append(f"⚡ 車検満期まで{days_to_exp}日！車検予約を提案する")
+                        actions.append(f"⚡ 車検満期まで{days_to_exp}日！本日必ず車検予約を取る")
+                    actions.append("🥉【B対応】車検は定着。目標はオイル＋タイヤのセット化（来店頻度アップ）")
+                    if "オイル交換" in untreated_list:
+                        actions.append("💡 「次回オイル交換の予約を今日取りましょう。タイヤの確認も一緒に」")
+                    elif "タイヤ交換" in untreated_list:
+                        actions.append("💡 「タイヤの溝を確認しましたが、次の交換時期が近づいています」")
+                    if elapsed_years_action >= 10:
+                        actions.append(f"🚨 車齢{elapsed_years_action}年！乗り換え提案も視野に入れる")
+
+                elif rank == "C":
+                    actions.append("【C対応】車検未獲得が最大課題。信頼関係を築きながら必ず一声かける")
+                    if days_to_exp is not None and 0 <= days_to_exp <= 90:
+                        actions.append(f"⚡ 車検満期まで{days_to_exp}日！「次回の車検はぜひ当店で」と伝える")
                     else:
-                        actions.append("📞 次回オイル交換の予約を今日取る（接触頻度アップが最優先）")
+                        actions.append("🔑 「次回の車検はぜひ当店で。まとめてお願いいただくと手間が省けますよ」")
+                    actions.append("👋 今日は売ろうとしない。名前を覚えて「顔を覚えている店」を演出する")
+
+                else:  # D
+                    actions.append("【D対応】まず接触頻度を上げることが最優先")
+                    actions.append("📞 次回来店予約を今日取る（オイル交換・タイヤ点検などで理由をつくる）")
                     actions.append("👋 名前を呼んで前回の会話を思い出させる（「顔を覚えている店」を演出）")
 
                 # 車検満期アラート（全ランク共通）
                 if days_to_exp is not None:
                     if days_to_exp < 0:
                         actions.append(f"⚠️ 車検満期が{abs(days_to_exp)}日超過しています！早急に対応")
-                    elif days_to_exp <= 30 and rank not in ["S"]:
+                    elif days_to_exp <= 30 and rank not in ["SSS", "S"]:
                         actions.append(f"🔴 車検満期まで{days_to_exp}日！本日予約必須")
 
                 return " ／ ".join(actions) if actions else "通常対応"
 
             def rank_badge(rank):
-                colors = {"S": "#d97706", "A": "#2563eb", "B": "#059669", "C": "#64748b", "D": "#94a3b8"}
+                colors = {
+                    "SSS": "#7c2d12",  # 最上位・濃い赤茶
+                    "S"  : "#d97706",  # 金
+                    "A"  : "#2563eb",  # 青
+                    "B"  : "#059669",  # 緑
+                    "C"  : "#64748b",  # グレー
+                    "D"  : "#94a3b8",  # 薄グレー
+                }
                 bg = colors.get(rank, "#94a3b8")
-                return f'<span style="background:{bg};color:white;padding:2px 10px;border-radius:10px;font-weight:900;font-size:0.82rem;">{rank}ランク</span>'
+                label = "SSSランク" if rank == "SSS" else f"{rank}ランク"
+                return f'<span style="background:{bg};color:white;padding:2px 10px;border-radius:10px;font-weight:900;font-size:0.82rem;">{label}</span>'
 
             def days_badge(days):
                 try:
@@ -1302,6 +1439,7 @@ with tab0:
 
                         # スタイル定義
                         RANK_BG = {
+                            "SSS": colors.HexColor("#fef2f2"),
                             "S": colors.HexColor("#fef3c7"),
                             "A": colors.HexColor("#dbeafe"),
                             "B": colors.HexColor("#dcfce7"),
@@ -1309,6 +1447,7 @@ with tab0:
                             "D": colors.HexColor("#f8fafc"),
                         }
                         RANK_FG = {
+                            "SSS": colors.HexColor("#7c2d12"),
                             "S": colors.HexColor("#92400e"),
                             "A": colors.HexColor("#1e40af"),
                             "B": colors.HexColor("#065f46"),
