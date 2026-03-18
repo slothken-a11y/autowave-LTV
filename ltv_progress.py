@@ -490,7 +490,7 @@ GDRIVE_IDS_LTV = {
 
 # Googleドライブ上の担当者マスターCSVファイルID
 # ※ GoogleドライブにCSVをアップロードしてIDを設定してください
-GDRIVE_STAFF_ID = ""  # ← 設定後にファイルIDを記入
+GDRIVE_STAFF_ID = "1v4ql3ilK1y7z1UyJG1yUyzOpYxWjgPFi"
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_gdrive_csv(file_id: str, name: str) -> pd.DataFrame:
