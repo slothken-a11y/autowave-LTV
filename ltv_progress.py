@@ -2937,6 +2937,13 @@ with tab6:
 with tab_kpi:
     st.markdown('<div class="sec">🎯 営業活動KPIダッシュボード</div>', unsafe_allow_html=True)
 
+    # ── ログ読み込みボタン
+    col_reload, col_info = st.columns([1, 4])
+    with col_reload:
+        if st.button("🔄 最新データを読み込む", use_container_width=True, key="kpi_reload"):
+            load_activity_logs.clear()
+            st.rerun()
+
     kpi_logs = load_activity_logs()
 
     if not kpi_logs:
@@ -2944,141 +2951,293 @@ with tab_kpi:
     else:
         df_kpi = logs_to_df(kpi_logs)
         df_kpi["記録日"] = pd.to_datetime(df_kpi["記録日"], errors="coerce")
-        df_kpi["フェーズ番号"] = df_kpi["フェーズ"].map({
-            "─ 未記録":0,"提案できなかった":1,"提案した":2,
-            "興味あり ⭐":3,"仮予約 📅":4,"本予約 ✅":5,"売れた ✅":4
-        }).fillna(0).astype(int)
+
+        # フェーズを正規化（絵文字除去）
+        def clean_phase(p):
+            return str(p).replace(" ⭐","").replace(" 📅","").replace(" ✅","").strip()
+        df_kpi["フェーズ_clean"] = df_kpi["フェーズ"].apply(clean_phase)
+
+        # フェーズ番号付与
+        phase_num_map = {
+            "提案できなかった": 1, "提案した": 2,
+            "興味あり": 3, "仮予約": 4, "本予約": 5, "売れた": 5,
+        }
+        df_kpi["フェーズ番号"] = df_kpi["フェーズ_clean"].map(phase_num_map).fillna(0).astype(int)
+
+        # 車検専用・サービス専用を区別
+        SHAKEN_SVC = "車検"
+        OTHER_SVCS = ["タイヤ交換","オイル交換","12ヶ月点検","バッテリー交換",
+                      "コーティング","ワイパー交換","自動車販売","保険"]
 
         today_dt = pd.Timestamp(datetime.today().date())
         this_month = today_dt.to_period("M")
 
-        # 期間フィルタ
-        kpi_period = st.radio("期間", ["本日", "今月", "全期間"], horizontal=True, key="kpi_period")
-        if kpi_period == "本日":
-            df_kpi_f = df_kpi[df_kpi["記録日"].dt.date == today_dt.date()]
-        elif kpi_period == "今月":
-            df_kpi_f = df_kpi[df_kpi["記録日"].dt.to_period("M") == this_month]
-        else:
-            df_kpi_f = df_kpi.copy()
-
-        # 店舗・担当者フィルタ
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            stores_kpi = ["全店舗"] + sorted(df_kpi_f["店舗"].dropna().unique().tolist())
+        # ── フィルタ ──
+        st.markdown("#### 🔎 絞り込み")
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            kpi_period = st.radio("期間", ["本日","今月","全期間"],
+                                   horizontal=True, key="kpi_period")
+        with fc2:
+            stores_kpi = ["全店舗"] + sorted(df_kpi["店舗"].dropna().unique().tolist())
             sel_store_kpi = st.selectbox("店舗", stores_kpi, key="kpi_store")
-        with col_f2:
-            staffs_kpi = ["全担当者"] + sorted(df_kpi_f["担当者"].dropna().unique().tolist())
+        with fc3:
+            staffs_kpi = ["全担当者"] + sorted(df_kpi["担当者"].dropna().unique().tolist())
             sel_staff_kpi = st.selectbox("担当者", staffs_kpi, key="kpi_staff")
 
+        # フィルタ適用
+        if kpi_period == "本日":
+            df_f = df_kpi[df_kpi["記録日"].dt.date == today_dt.date()].copy()
+        elif kpi_period == "今月":
+            df_f = df_kpi[df_kpi["記録日"].dt.to_period("M") == this_month].copy()
+        else:
+            df_f = df_kpi.copy()
         if sel_store_kpi != "全店舗":
-            df_kpi_f = df_kpi_f[df_kpi_f["店舗"] == sel_store_kpi]
+            df_f = df_f[df_f["店舗"] == sel_store_kpi]
         if sel_staff_kpi != "全担当者":
-            df_kpi_f = df_kpi_f[df_kpi_f["担当者"] == sel_staff_kpi]
+            df_f = df_f[df_f["担当者"] == sel_staff_kpi]
 
-        # ── KPIサマリー ──
-        st.markdown("### 📊 KPIサマリー")
-        total_act   = len(df_kpi_f[df_kpi_f["フェーズ番号"] >= 2])  # 提案した以上
-        total_kyomi = len(df_kpi_f[df_kpi_f["フェーズ番号"] >= 3])  # 興味あり以上
-        total_kari  = len(df_kpi_f[df_kpi_f["フェーズ"].str.contains("仮予約", na=False)])
-        total_hon   = len(df_kpi_f[df_kpi_f["フェーズ"].str.contains("本予約|売れた", na=False)])
+        st.caption(f"対象ログ: {len(df_f):,}件")
+        st.markdown("---")
+
+        # ══════════════════════════════════════════
+        # ① 全体KPIサマリー
+        # ══════════════════════════════════════════
+        st.markdown("### 📊 ① 全体KPIサマリー")
+        total_act   = len(df_f[df_f["フェーズ番号"] >= 2])
+        total_kyomi = len(df_f[df_f["フェーズ番号"] >= 3])
+        total_yoyaku= len(df_f[df_f["フェーズ番号"] >= 4])
+        total_seiyaku= len(df_f[df_f["フェーズ番号"] >= 5])
         conv_rate   = total_kyomi / total_act * 100 if total_act > 0 else 0
 
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("提案件数", f"{total_act:,}件")
-        k2.metric("興味あり", f"{total_kyomi:,}件")
-        k3.metric("仮予約", f"{total_kari:,}件")
-        k4.metric("本予約・成約", f"{total_hon:,}件")
+        k1,k2,k3,k4,k5 = st.columns(5)
+        k1.metric("提案件数（全サービス）", f"{total_act:,}件")
+        k2.metric("興味あり以上", f"{total_kyomi:,}件")
+        k3.metric("予約・仮予約", f"{total_yoyaku:,}件")
+        k4.metric("本予約・成約", f"{total_seiyaku:,}件")
         k5.metric("転換率", f"{conv_rate:.1f}%", help="興味あり÷提案件数")
+        st.markdown("---")
+
+        # ══════════════════════════════════════════
+        # ② サービス別フェーズ進捗（メイン）
+        # ══════════════════════════════════════════
+        st.markdown("### 🔍 ② サービス別 提案フェーズ進捗")
+        st.caption("各サービスの提案がどのフェーズまで進んでいるかを可視化します")
+
+        all_svcs_in_log = df_f["提案項目"].dropna().unique().tolist()
+        display_svcs = [s for s in ([SHAKEN_SVC] + OTHER_SVCS) if s in all_svcs_in_log]
+
+        if display_svcs:
+            # フェーズラベル定義
+            shaken_phases = ["提案できなかった","提案した","興味あり","仮予約","本予約"]
+            svc_phases    = ["提案できなかった","提案した","興味あり","売れた"]
+
+            svc_rows = []
+            for svc in display_svcs:
+                df_svc = df_f[df_f["提案項目"] == svc]
+                phases = shaken_phases if svc == SHAKEN_SVC else svc_phases
+                row = {"サービス": svc, "合計": len(df_svc)}
+                for ph in phases:
+                    row[ph] = len(df_svc[df_svc["フェーズ_clean"] == ph])
+                row["転換率"] = (
+                    f"{row.get('興味あり',0) / max(row['合計'],1)*100:.0f}%"
+                )
+                svc_rows.append(row)
+
+            df_svc_summary = pd.DataFrame(svc_rows)
+
+            # ── 車検：フネル表示 ──
+            st.markdown("#### 🔑 車検提案 フェーズ別件数")
+            df_shaken_svc = df_f[df_f["提案項目"] == SHAKEN_SVC]
+            if len(df_shaken_svc) > 0:
+                sh_cols = st.columns(5)
+                sh_labels = [
+                    ("提案できなかった","#e2e8f0","#475569"),
+                    ("提案した","#dbeafe","#1d4ed8"),
+                    ("興味あり ⭐","#fef9c3","#854d0e"),
+                    ("仮予約 📅","#fed7aa","#9a3412"),
+                    ("本予約 ✅","#dcfce7","#166534"),
+                ]
+                for col, (label, bg, fg) in zip(sh_cols, sh_labels):
+                    ph_key = label.split(" ")[0]
+                    # 部分一致で検索
+                    n = len(df_shaken_svc[df_shaken_svc["フェーズ_clean"].str.contains(ph_key, na=False)])
+                    with col:
+                        st.markdown(f"""
+<div style="background:{bg};border-radius:8px;padding:0.6rem;text-align:center;margin:0.2rem 0;">
+  <div style="font-size:0.75rem;color:{fg};font-weight:600;">{label.replace(chr(10)," ")}</div>
+  <div style="font-size:1.6rem;font-weight:900;color:{fg};">{n}</div>
+  <div style="font-size:0.7rem;color:{fg};">件</div>
+</div>""", unsafe_allow_html=True)
+            else:
+                st.info("車検提案の記録がまだありません")
+
+            st.markdown("")
+
+            # ── その他サービス：横並びフェーズバー ──
+            st.markdown("#### 💡 サービス別 提案フェーズ一覧")
+            for svc in [s for s in display_svcs if s != SHAKEN_SVC]:
+                df_svc = df_f[df_f["提案項目"] == svc]
+                if len(df_svc) == 0:
+                    continue
+                total_svc = len(df_svc)
+                n_teian   = len(df_svc[df_svc["フェーズ_clean"] == "提案した"])
+                n_kyomi   = len(df_svc[df_svc["フェーズ_clean"] == "興味あり"])
+                n_ureta   = len(df_svc[df_svc["フェーズ_clean"] == "売れた"])
+                n_dame    = len(df_svc[df_svc["フェーズ_clean"] == "提案できなかった"])
+
+                # バーの幅計算
+                bar_html = ""
+                segments = [
+                    (n_dame,  "#e2e8f0","提案できなかった"),
+                    (n_teian, "#93c5fd","提案した"),
+                    (n_kyomi, "#fde68a","興味あり"),
+                    (n_ureta, "#86efac","売れた"),
+                ]
+                for n, color, label in segments:
+                    if n > 0 and total_svc > 0:
+                        pct = n / total_svc * 100
+                        bar_html += (f'<div style="width:{pct:.1f}%;background:{color};'
+                                     f'height:24px;display:inline-block;vertical-align:middle;'
+                                     f'title=\"{label}: {n}件\"></div>')
+
+                kyomi_rate = n_kyomi / max(total_svc,1) * 100
+                seiyaku_rate = n_ureta / max(total_svc,1) * 100
+                st.markdown(f"""
+<div style="margin:0.4rem 0;padding:0.4rem 0.8rem;background:#f8fafc;border-radius:6px;border-left:4px solid #2563eb;">
+  <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.3rem;">
+    <span style="font-weight:700;font-size:0.9rem;min-width:120px;">{svc}</span>
+    <span style="font-size:0.8rem;color:#64748b;">計{total_svc}件</span>
+    <span style="font-size:0.8rem;color:#854d0e;">興味あり: {n_kyomi}件({kyomi_rate:.0f}%)</span>
+    <span style="font-size:0.8rem;color:#166534;font-weight:700;">成約: {n_ureta}件({seiyaku_rate:.0f}%)</span>
+  </div>
+  <div style="width:100%;background:#e2e8f0;border-radius:4px;overflow:hidden;">{bar_html}</div>
+  <div style="display:flex;gap:1rem;font-size:0.7rem;color:#64748b;margin-top:0.2rem;">
+    <span>■ <span style="color:#94a3b8;">提案できず{n_dame}</span></span>
+    <span>■ <span style="color:#3b82f6;">提案{n_teian}</span></span>
+    <span>■ <span style="color:#f59e0b;">興味あり{n_kyomi}</span></span>
+    <span>■ <span style="color:#22c55e;">成約{n_ureta}</span></span>
+  </div>
+</div>""", unsafe_allow_html=True)
+        else:
+            st.info("サービス提案の記録がまだありません")
 
         st.markdown("---")
 
-        # ── 提案項目別集計 ──
-        st.markdown("### 🔍 提案項目別 結果")
-        if len(df_kpi_f) > 0:
-            item_summary = df_kpi_f.groupby("提案項目").agg(
+        # ══════════════════════════════════════════
+        # ③ ランク別提案状況
+        # ══════════════════════════════════════════
+        st.markdown("### 🏆 ③ 顧客ランク別 提案実績")
+        if "ランク" in df_f.columns:
+            rank_kpi = df_f.groupby("ランク").agg(
                 提案件数=("フェーズ番号", lambda x: (x >= 2).sum()),
                 興味あり=("フェーズ番号", lambda x: (x >= 3).sum()),
-                成約=("フェーズ番号", lambda x: (x >= 4).sum()),
+                成約=("フェーズ番号", lambda x: (x >= 5).sum()),
             ).reset_index()
-            item_summary["転換率"] = (
-                item_summary["興味あり"] / item_summary["提案件数"].replace(0,1) * 100
+            rank_kpi["転換率"] = (
+                rank_kpi["興味あり"] / rank_kpi["提案件数"].replace(0,1) * 100
             ).round(1).astype(str) + "%"
-            item_summary = item_summary[item_summary["提案件数"] > 0].sort_values("提案件数", ascending=False)
-            st.dataframe(item_summary, use_container_width=True, hide_index=True)
+            rank_kpi = rank_kpi[rank_kpi["提案件数"] > 0]
+            rank_order_kpi = ["SSS","S","A","B","C","D"]
+            rank_kpi["ランク順"] = rank_kpi["ランク"].map(
+                {r:i for i,r in enumerate(rank_order_kpi)}).fillna(9)
+            rank_kpi = rank_kpi.sort_values("ランク順").drop(columns="ランク順")
+            st.dataframe(rank_kpi, use_container_width=True, hide_index=True)
+        else:
+            st.info("ランク情報が記録されていません")
 
         st.markdown("---")
 
-        # ── 担当者別集計 ──
-        st.markdown("### 👤 担当者別 実績")
-        if len(df_kpi_f) > 0:
-            staff_summary = df_kpi_f.groupby("担当者").agg(
-                提案件数=("フェーズ番号", lambda x: (x >= 2).sum()),
-                興味あり=("フェーズ番号", lambda x: (x >= 3).sum()),
-                成約=("フェーズ番号", lambda x: (x >= 4).sum()),
-            ).reset_index()
-            staff_summary["転換率"] = (
-                staff_summary["興味あり"] / staff_summary["提案件数"].replace(0,1) * 100
-            ).round(1).astype(str) + "%"
-            staff_summary = staff_summary[staff_summary["提案件数"] > 0].sort_values("提案件数", ascending=False)
-            st.dataframe(staff_summary, use_container_width=True, hide_index=True)
+        # ══════════════════════════════════════════
+        # ④ 担当者別実績
+        # ══════════════════════════════════════════
+        st.markdown("### 👤 ④ 担当者別 実績")
+        if len(df_f) > 0:
+            for staff_n in sorted(df_f["担当者"].dropna().unique()):
+                df_st = df_f[df_f["担当者"] == staff_n]
+                total_p = len(df_st[df_st["フェーズ番号"] >= 2])
+                total_k = len(df_st[df_st["フェーズ番号"] >= 3])
+                total_s = len(df_st[df_st["フェーズ番号"] >= 5])
+                with st.expander(
+                    f"👤 {staff_n}　提案{total_p}件 / 興味あり{total_k}件 / 成約{total_s}件",
+                    expanded=False
+                ):
+                    df_st_svc = df_st.groupby("提案項目").agg(
+                        提案=("フェーズ番号", lambda x: (x >= 2).sum()),
+                        興味あり=("フェーズ番号", lambda x: (x >= 3).sum()),
+                        成約=("フェーズ番号", lambda x: (x >= 5).sum()),
+                    ).reset_index()
+                    df_st_svc["転換率"] = (
+                        df_st_svc["興味あり"] / df_st_svc["提案"].replace(0,1) * 100
+                    ).round(1).astype(str) + "%"
+                    df_st_svc = df_st_svc[df_st_svc["提案"] > 0]
+                    st.dataframe(df_st_svc, use_container_width=True, hide_index=True)
 
         st.markdown("---")
 
-        # ── 担当者別詳細実績 ──
-        st.markdown("### 👤 担当者別 詳細実績")
-        if len(df_kpi_f) > 0:
-            staff_detail = df_kpi_f.groupby(["担当者","提案項目"]).agg(
-                提案=("フェーズ番号", lambda x: (x >= 2).sum()),
-                興味あり=("フェーズ番号", lambda x: (x >= 3).sum()),
-                成約=("フェーズ番号", lambda x: (x >= 4).sum()),
-            ).reset_index()
-            staff_detail = staff_detail[staff_detail["提案"] > 0]
-            staff_detail["転換率"] = (
-                staff_detail["興味あり"] / staff_detail["提案"].replace(0,1) * 100
-            ).round(1).astype(str) + "%"
-
-            # 担当者別に折り畳み表示
-            for staff_name_kpi in staff_detail["担当者"].unique():
-                df_s = staff_detail[staff_detail["担当者"]==staff_name_kpi]
-                total_p  = df_s["提案"].sum()
-                total_k  = df_s["興味あり"].sum()
-                total_s  = df_s["成約"].sum()
-                with st.expander(f"👤 {staff_name_kpi}　提案{total_p}件 / 興味あり{total_k}件 / 成約{total_s}件"):
-                    st.dataframe(df_s[["提案項目","提案","興味あり","成約","転換率"]],
-                                 use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-
-        # ── 車検フォローアップリスト ──
-        st.markdown("### 📋 車検フォローアップリスト（興味あり・仮予約）")
+        # ══════════════════════════════════════════
+        # ⑤ 車検フォローアップリスト
+        # ══════════════════════════════════════════
+        st.markdown("### 📋 ⑤ 車検フォローアップリスト（興味あり・仮予約）")
         df_followup = df_kpi[
-            (df_kpi["提案項目"] == "車検") &
-            (df_kpi["フェーズ"].str.contains("興味あり|仮予約", na=False))
+            (df_kpi["提案項目"] == SHAKEN_SVC) &
+            (df_kpi["フェーズ_clean"].isin(["興味あり","仮予約"]))
         ].copy()
 
         if len(df_followup) > 0:
-            df_followup["車検満了日_dt"] = pd.to_datetime(df_followup["車検満了日"], errors="coerce")
-            df_followup["満了まで"] = (df_followup["車検満了日_dt"] - today_dt).dt.days
-            df_followup["アクション推奨"] = df_followup["満了まで"].apply(
+            df_followup["車検満了日_dt"] = pd.to_datetime(
+                df_followup["車検満了日"], errors="coerce")
+            df_followup["満了まで(日)"] = (
+                df_followup["車検満了日_dt"] - today_dt).dt.days
+            df_followup["アクション"] = df_followup["満了まで(日)"].apply(
                 lambda d: "🔴 今すぐ連絡" if pd.notna(d) and d <= 90
-                else ("⚠️ 3ヶ月以内に連絡" if pd.notna(d) and d <= 180 else "📅 継続フォロー")
+                else ("⚠️ 3ヶ月以内" if pd.notna(d) and d <= 180 else "📅 継続フォロー")
             )
-            show_cols = ["記録日","顧客ID","車両ID","担当者","フェーズ","車検満了日","満了まで","アクション推奨","備考"]
+            show_cols = ["記録日","顧客ID","車両ID","登録番号","担当者",
+                         "フェーズ","車検満了日","満了まで(日)","アクション","備考"]
             show_cols = [c for c in show_cols if c in df_followup.columns]
-            st.dataframe(df_followup[show_cols].sort_values("満了まで"), use_container_width=True, hide_index=True)
-
-            # CSVエクスポート（営業リスト用）
+            st.dataframe(
+                df_followup[show_cols].sort_values("満了まで(日)"),
+                use_container_width=True, hide_index=True
+            )
             buf_fu = BytesIO()
             df_followup[show_cols].to_csv(buf_fu, index=False, encoding="utf-8-sig")
             st.download_button(
                 "📥 フォローアップリストCSVダウンロード（予約システム取込用）",
                 buf_fu.getvalue(),
                 f"followup_shaken_{datetime.today().strftime('%Y%m%d')}.csv",
-                "text/csv",
-                use_container_width=True,
+                "text/csv", use_container_width=True,
             )
         else:
             st.info("車検で「興味あり」または「仮予約」のログがまだありません")
+
+        st.markdown("---")
+
+        # ══════════════════════════════════════════
+        # ⑥ 成約・興味あり：全サービスフォローリスト
+        # ══════════════════════════════════════════
+        st.markdown("### 📋 ⑥ 興味あり顧客フォローリスト（全サービス）")
+        df_all_kyomi = df_kpi[
+            df_kpi["フェーズ_clean"].isin(["興味あり","仮予約"])
+        ].copy()
+        if len(df_all_kyomi) > 0:
+            kyomi_cols = ["記録日","顧客ID","車両ID","登録番号","担当者",
+                          "提案項目","フェーズ","備考"]
+            kyomi_cols = [c for c in kyomi_cols if c in df_all_kyomi.columns]
+            st.dataframe(
+                df_all_kyomi[kyomi_cols].sort_values("記録日", ascending=False),
+                use_container_width=True, hide_index=True
+            )
+            buf_k = BytesIO()
+            df_all_kyomi[kyomi_cols].to_csv(buf_k, index=False, encoding="utf-8-sig")
+            st.download_button(
+                "📥 全サービス興味ありリストCSVダウンロード",
+                buf_k.getvalue(),
+                f"kyomi_all_{datetime.today().strftime('%Y%m%d')}.csv",
+                "text/csv", use_container_width=True,
+            )
+        else:
+            st.info("「興味あり」「仮予約」のログがまだありません")
 
 
 # ──────────────────────────────────────────────
