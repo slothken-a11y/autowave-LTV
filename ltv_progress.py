@@ -1,5 +1,5 @@
 r"""
-生涯顧客LTV進捗管理システム v4.0
+生涯顧客LTV進捗管理システム v4.2（タイヤ提案アラート対応版）
 ==============================
 オートウェーブ 顧客育成トラッカー
 
@@ -224,6 +224,102 @@ def normalize_plate(plate: str) -> str:
     # スペース（全角・半角）除去
     s = s.replace(" ", "").replace("　", "").replace("　", "")
     return s
+
+
+def is_truthy_flag(v) -> bool:
+    """購入済み等のフラグ判定をゆるく吸収する"""
+    if pd.isna(v):
+        return False
+    s = str(v).strip().lower()
+    if s in ["", "0", "false", "nan", "none", "-", "ー", "×", "x", "no", "off"]:
+        return False
+    return True
+
+
+def load_tire_alert_dataframe(source, source_name="タイヤ提案履歴") -> pd.DataFrame:
+    """タイヤ提案履歴CSVを読み込み、登録番号ごとの最新アラート情報へ整形する"""
+    if source is None:
+        return pd.DataFrame(columns=[
+            "登録番号_norm", "前回タイヤ提案日", "タイヤ提案対象区分",
+            "タイヤ提案コメント", "タイヤ交換提案対象フラグ", "タイヤ交換提案アラート"
+        ])
+
+    if isinstance(source, pd.DataFrame):
+        df_raw = source.copy()
+    elif isinstance(source, tuple) and len(source) == 2 and source_name == "gdrive":
+        fname, fid = source
+        df_raw = norm(load_gdrive_csv(fid, fname))
+        source_name = fname
+    elif hasattr(source, 'read'):
+        df_raw = norm(read_csv(source, source_name))
+    else:
+        df_raw = norm(read_path(source, source_name))
+
+    df = df_raw.copy()
+    reg_col = find_col(df, ["登録番号", "車両登録番号", "ナンバー"])
+    carry_col = find_col(df, ["持ち帰りタイヤ交換オススメ", "持ち帰りタイヤ", "持帰りタイヤ交換オススメ"])
+    fitted_col = find_col(df, ["装着タイヤ交換オススメ", "装着タイヤ", "装着タイヤ交換おすすめ"])
+    comment_col = find_col(df, ["フリーコメント", "コメント", "備考"])
+    purchased_col = find_col(df, ["タイヤを購入済みか？", "タイヤ購入済みフラグ", "購入済み", "購入済フラグ"])
+    date_col = find_col(df, ["前回タイヤ提案日", "作業日", "提案日", "日付"])
+
+    if not reg_col:
+        raise ValueError(f"{source_name} に登録番号列が見つかりません")
+
+    df["登録番号_norm"] = df[reg_col].astype(str).apply(normalize_plate)
+    df = df[df["登録番号_norm"] != ""].copy()
+
+    if date_col:
+        df["前回タイヤ提案日"] = pd.to_datetime(df[date_col], errors="coerce")
+    else:
+        df["前回タイヤ提案日"] = pd.NaT
+
+    df["持ち帰り提案"] = df[carry_col].apply(is_truthy_flag) if carry_col else False
+    df["装着提案"] = df[fitted_col].apply(is_truthy_flag) if fitted_col else False
+    df["購入済み"] = df[purchased_col].apply(is_truthy_flag) if purchased_col else False
+    df["タイヤ提案コメント"] = df[comment_col].fillna("").astype(str).str.strip() if comment_col else ""
+    df["_row_order"] = range(len(df))
+    df = df.sort_values(["登録番号_norm", "前回タイヤ提案日", "_row_order"], ascending=[True, False, False])
+
+    def summarize(group: pd.DataFrame) -> pd.Series:
+        latest = group.iloc[0]
+        if bool(latest.get("購入済み", False)):
+            return pd.Series({
+                "前回タイヤ提案日": latest.get("前回タイヤ提案日"),
+                "タイヤ提案対象区分": "",
+                "タイヤ提案コメント": latest.get("タイヤ提案コメント", ""),
+                "タイヤ交換提案対象フラグ": 0,
+                "タイヤ交換提案アラート": "",
+            })
+
+        targets = []
+        if bool(latest.get("装着提案", False)):
+            targets.append("装着タイヤ")
+        if bool(latest.get("持ち帰り提案", False)):
+            targets.append("持ち帰りタイヤ")
+        target_label = "・".join(targets)
+        if not target_label:
+            alert = ""
+            flag = 0
+        else:
+            alert = f"タイヤ交換提案対象（{target_label}）"
+            flag = 1
+        return pd.Series({
+            "前回タイヤ提案日": latest.get("前回タイヤ提案日"),
+            "タイヤ提案対象区分": target_label,
+            "タイヤ提案コメント": latest.get("タイヤ提案コメント", ""),
+            "タイヤ交換提案対象フラグ": flag,
+            "タイヤ交換提案アラート": alert,
+        })
+
+    agg_cols = ["登録番号_norm", "前回タイヤ提案日", "持ち帰り提案", "装着提案", "購入済み", "タイヤ提案コメント", "_row_order"]
+    agg_cols = [c for c in agg_cols if c in df.columns]
+    result = df.groupby("登録番号_norm", as_index=False)[agg_cols].apply(summarize).reset_index(drop=True)
+    if "前回タイヤ提案日" in result.columns:
+        result["前回タイヤ提案日_text"] = result["前回タイヤ提案日"].dt.strftime("%Y-%m-%d").fillna("")
+    else:
+        result["前回タイヤ提案日_text"] = ""
+    return result
 
 def assign_rank_customer(cust_row):
     """
@@ -487,7 +583,11 @@ GDRIVE_IDS_LTV = {
     "Reservation.csv"               : "1qUHPbUHusS40jT0nAcNaaY2vEo0AfT7i",
     "保険.csv"                      : "",  # 作成後に設定
     "staff_master.csv"              : "",  # 担当者マスター（設定後に記入）
+    "タイヤ提案履歴.csv"            : "1U0JLSq-5Ok59N4RGtvUkg0hLlDFs7gEq",  # タイヤ提案履歴CSV
 }
+
+# Googleドライブ上のタイヤ提案履歴CSVファイルID（所定フォルダへ配置したファイルIDを設定）
+GDRIVE_TIRE_ALERT_ID = GDRIVE_IDS_LTV.get("タイヤ提案履歴.csv", "")
 
 # Googleドライブ上の担当者マスターCSVファイルID
 # ※ GoogleドライブにCSVをアップロードしてIDを設定してください
@@ -515,6 +615,7 @@ MASTER_NAMES = ["Master_Data.csv", "マスターデータ.csv", "master_data.csv
 RSV_NAMES    = ["Reservation.csv", "予約データ.csv", "reservation.csv", "予約.csv"]
 # 仮予約データのファイル名候補
 KARI_RSV_NAMES = ["仮予約.csv", "仮予約データ.csv", "kari_reservation.csv", "provisional.csv"]
+TIRE_ALERT_NAMES = ["タイヤ提案履歴.csv", "tire_alert.csv", "tire_proposal_history.csv"]
 
 # 車検と判定するメニュー名キーワード（元メニュー名で判定）
 SHAKEN_KEYWORDS = [
@@ -555,14 +656,22 @@ def scan_data_dir():
             kari_path = p
             break
 
-    # 取引CSVリスト（マスター・予約・仮予約以外）
-    exclude = set(MASTER_NAMES + RSV_NAMES + KARI_RSV_NAMES)
+    # タイヤ提案履歴特定
+    tire_alert_path = None
+    for name in TIRE_ALERT_NAMES:
+        p = DATA_DIR / name
+        if p.exists():
+            tire_alert_path = p
+            break
+
+    # 取引CSVリスト（マスター・予約・仮予約・タイヤ提案履歴以外）
+    exclude = set(MASTER_NAMES + RSV_NAMES + KARI_RSV_NAMES + TIRE_ALERT_NAMES)
     txn_paths = [
         p for p in all_csvs
         if p.name not in exclude
     ]
 
-    return master_path, txn_paths, rsv_path, kari_path
+    return master_path, txn_paths, rsv_path, kari_path, tire_alert_path
 
 
 def read_path(p, name=""):
@@ -579,7 +688,7 @@ def read_path(p, name=""):
 # サイドバー
 # ──────────────────────────────────────────────
 # dataフォルダのスキャン
-auto_master_path, auto_txn_paths, auto_rsv_path, auto_kari_path = scan_data_dir()
+auto_master_path, auto_txn_paths, auto_rsv_path, auto_kari_path, auto_tire_alert_path = scan_data_dir()
 data_dir_exists = DATA_DIR.exists()
 
 with st.sidebar:
@@ -619,6 +728,10 @@ with st.sidebar:
     f_kari = st.file_uploader(
         "④ 仮予約.csv（任意）", type=["csv"], key="kari",
         help="仮予約データ。登録番号列があれば自動で突合します。\ndataフォルダに「仮予約.csv」を置いても自動読込されます。"
+    )
+    f_tire_alert = st.file_uploader(
+        "⑤ タイヤ提案履歴.csv（任意）", type=["csv"], key="tire_alert",
+        help="Googleドライブ配置前のテスト用。J列=登録番号、N/O列=提案対象、P列=コメント、Q列=購入済み、B列=前回提案日として読み込みます。"
     )
 
     st.markdown("---")
@@ -756,6 +869,16 @@ with st.sidebar:
         st.markdown(f'<div class="upload-status upload-ok">📁 仮予約：{auto_kari_path.name}</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="upload-status upload-wait">─ 仮予約データ（任意）</div>', unsafe_allow_html=True)
+
+    # タイヤ提案履歴
+    if f_tire_alert:
+        st.markdown('<div class="upload-status upload-ok">✅ タイヤ提案履歴（手動アップロード）</div>', unsafe_allow_html=True)
+    elif auto_tire_alert_path:
+        st.markdown(f'<div class="upload-status upload-ok">📁 タイヤ提案履歴：{auto_tire_alert_path.name}</div>', unsafe_allow_html=True)
+    elif GDRIVE_TIRE_ALERT_ID:
+        st.markdown('<div class="upload-status upload-ok">☁️ タイヤ提案履歴（Googleドライブ）</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="upload-status upload-wait">─ タイヤ提案履歴（任意）</div>', unsafe_allow_html=True)
 
     # dataフォルダのパス表示
     st.markdown("---")
@@ -921,6 +1044,19 @@ if store_col and store_col != "入庫店舗ID":
 elif "入庫店舗ID" not in df_master.columns:
     df_master["入庫店舗ID"] = "全店"
 df_master["車両ID"] = df_master["車両ID"].astype(str).str.strip()
+
+# ── タイヤ提案履歴CSV読込 ──
+df_tire_alert = pd.DataFrame()
+try:
+    if f_tire_alert is not None:
+        df_tire_alert = load_tire_alert_dataframe(f_tire_alert, "タイヤ提案履歴.csv")
+    elif auto_tire_alert_path is not None:
+        df_tire_alert = load_tire_alert_dataframe(auto_tire_alert_path, "タイヤ提案履歴.csv")
+    elif GDRIVE_TIRE_ALERT_ID:
+        df_tire_alert = load_tire_alert_dataframe(("タイヤ提案履歴.csv", GDRIVE_TIRE_ALERT_ID), "gdrive")
+except Exception as e:
+    st.warning(f"タイヤ提案履歴読み込みエラー: {e}")
+    df_tire_alert = pd.DataFrame()
 
 # ── 取引CSV突合 ──
 # 自動車販売のみキーが「登録番号」、それ以外は「車両ID」で突合する
@@ -1175,6 +1311,29 @@ else:
     df_master["仮予約数"] = 0
     df_master["予約サービス"] = ""
 
+# ── タイヤ提案履歴のマージ ──
+df_master["登録番号_norm"] = df_master["登録番号"].astype(str).apply(normalize_plate) if "登録番号" in df_master.columns else ""
+if df_tire_alert is not None and len(df_tire_alert) > 0 and "登録番号_norm" in df_master.columns:
+    tire_merge_cols = [
+        "登録番号_norm", "前回タイヤ提案日", "前回タイヤ提案日_text",
+        "タイヤ提案対象区分", "タイヤ提案コメント",
+        "タイヤ交換提案対象フラグ", "タイヤ交換提案アラート"
+    ]
+    tire_merge_cols = [c for c in tire_merge_cols if c in df_tire_alert.columns]
+    df_master = df_master.merge(df_tire_alert[tire_merge_cols], on="登録番号_norm", how="left")
+else:
+    df_master["前回タイヤ提案日"] = pd.NaT
+    df_master["前回タイヤ提案日_text"] = ""
+    df_master["タイヤ提案対象区分"] = ""
+    df_master["タイヤ提案コメント"] = ""
+    df_master["タイヤ交換提案対象フラグ"] = 0
+    df_master["タイヤ交換提案アラート"] = ""
+
+df_master["タイヤ交換提案対象フラグ"] = pd.to_numeric(df_master.get("タイヤ交換提案対象フラグ", 0), errors="coerce").fillna(0).astype(int)
+df_master["タイヤ提案対象区分"] = df_master.get("タイヤ提案対象区分", "").fillna("")
+df_master["タイヤ提案コメント"] = df_master.get("タイヤ提案コメント", "").fillna("")
+df_master["タイヤ交換提案アラート"] = df_master.get("タイヤ交換提案アラート", "").fillna("")
+
 # ── 仮予約CSV読み込み・突合 ──
 # 仮予約CSVの登録番号と突合して「仮予約あり」フラグを付与
 df_kari = None
@@ -1364,7 +1523,9 @@ with tab0:
 
             master_cols = ["登録番号_norm", "顧客ID", "車両ID", "入庫店舗ID",
                            "ランク", "取引サービス数", "未取引サービス", "車検満了日",
-                           "初年度登録", "粗利LTV_顧客"] +                           [f"取引_{s}" for s in all_services]
+                           "初年度登録", "粗利LTV_顧客", "前回タイヤ提案日", "前回タイヤ提案日_text",
+                           "タイヤ提案対象区分", "タイヤ提案コメント", "タイヤ交換提案対象フラグ",
+                           "タイヤ交換提案アラート"] + [f"取引_{s}" for s in all_services]
             master_cols = [c for c in master_cols if c in df_master_tmp.columns]
 
             # マージキーを正規化済み登録番号に変更
@@ -1577,14 +1738,16 @@ with tab0:
             n_s = (df_today.get("ランク", pd.Series()) == "S").sum()
             n_ab = df_today.get("ランク", pd.Series()).isin(["A", "B"]).sum()
             n_urgent = (df_today["車検残日数"].fillna(999) <= 90).sum() if "車検残日数" in df_today.columns else 0
+            n_tire_alert = pd.to_numeric(df_today.get("タイヤ交換提案対象フラグ", 0), errors="coerce").fillna(0).astype(int).sum()
 
             st.markdown(f"### 📅 {today_str}（{target_store}）の来店予定：**{n_today}件**")
-            k1, k2, k3, k4 = st.columns(4)
-            for col, (lbl, val, cls) in zip([k1, k2, k3, k4], [
+            k1, k2, k3, k4, k5 = st.columns(5)
+            for col, (lbl, val, cls) in zip([k1, k2, k3, k4, k5], [
                 ("本日 来店件数",      f"{n_today}件",  ""),
                 ("Sランク（要特別対応）", f"{n_s}件",    "gold"),
                 ("A+Bランク（提案対象）", f"{n_ab}件",   "purple"),
                 ("車検90日以内（要予約）", f"{n_urgent}件", "red"),
+                ("タイヤ提案対象", f"{n_tire_alert}件", "green"),
             ]):
                 with col:
                     st.markdown(f"""<div class="kpi-card {cls}">
@@ -1706,6 +1869,25 @@ with tab0:
                 }
                 sh_style, sh_label = shaken_colors.get(shaken_status, ("background:#f1f5f9;color:#475569", shaken_status))
 
+                tire_alert_html = ""
+                tire_flag = pd.to_numeric(row.get('タイヤ交換提案対象フラグ', 0), errors='coerce')
+                tire_flag = 0 if pd.isna(tire_flag) else int(tire_flag)
+                tire_alert_text = str(row.get('タイヤ交換提案アラート', '')).strip()
+                tire_prev_date = str(row.get('前回タイヤ提案日_text', '')).strip()
+                tire_comment = str(row.get('タイヤ提案コメント', '')).strip()
+                if tire_flag == 1 and tire_alert_text:
+                    extra_parts = []
+                    if tire_prev_date:
+                        extra_parts.append(f"前回提案日：{tire_prev_date}")
+                    if tire_comment:
+                        extra_parts.append(f"コメント：{tire_comment}")
+                    suffix = (" / " + " / ".join(extra_parts)) if extra_parts else ""
+                    tire_alert_html = (
+                        f'<div style="font-size:0.79rem;color:#92400e;background:#fff7ed;border:1px solid #fdba74;'
+                        f'border-radius:6px;padding:4px 8px;margin-bottom:0.25rem;font-weight:700;">'
+                        f'🚗 {tire_alert_text}{suffix}</div>'
+                    )
+
                 st.markdown(f"""
 <div style="background:{bg_color};border:1.5px solid {border_color};border-radius:10px;padding:0.85rem 1.2rem;margin:0.35rem 0;">
 <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.35rem;flex-wrap:wrap;">
@@ -1726,6 +1908,7 @@ with tab0:
 <div style="font-size:0.8rem;color:#666;margin-bottom:0.3rem;">
   未取引サービス：<span style="color:#dc2626;font-weight:600;">{row.get('未取引サービス','─')}</span>
 </div>
+{tire_alert_html}
 {'<div style="font-size:0.78rem;color:#555;background:#f8fafc;border-radius:5px;padding:2px 8px;margin-bottom:0.25rem;">📝 '+備考_disp+'</div>' if 備考_disp else ''}
 <div style="font-size:0.82rem;color:#1e3a5f;font-weight:600;background:rgba(255,255,255,0.7);border-radius:6px;padding:0.3rem 0.6rem;">
   📌 {row.get('接客指示','通常対応')}
@@ -1786,6 +1969,10 @@ with tab0:
                         for si, sm in enumerate(svc_marks):
                             [sc1, sc2, sc3][si % 3].markdown(sm)
                     st.markdown(f"**未取引サービス：** {row.get('未取引サービス','─')}")
+                    if int(pd.to_numeric(row.get('タイヤ交換提案対象フラグ',0), errors='coerce') or 0) == 1:
+                        st.markdown(f"**タイヤ提案アラート：** {row.get('タイヤ交換提案アラート','')} / 前回提案日：{row.get('前回タイヤ提案日_text','─')}")
+                        if str(row.get('タイヤ提案コメント','')).strip():
+                            st.markdown(f"**タイヤ提案コメント：** {row.get('タイヤ提案コメント','')}")
                     st.markdown(f"**接客指示：** {row.get('接客指示','通常対応')}")
 
                 # ── 活動記録（st.form化でリロード完全抑止）──
@@ -1918,7 +2105,8 @@ with tab0:
             # ── CSV ダウンロード ──
             st.markdown("")
             dl_cols = ["予約時刻", "登録番号", "サービス種別", "予約ステータス", "入庫店舗ID",
-                       "ランク", "取引サービス数", "未取引サービス", "車検残日数", "経過年数_years", "接客指示"]
+                       "ランク", "取引サービス数", "未取引サービス", "車検残日数", "経過年数_years",
+                       "タイヤ交換提案アラート", "前回タイヤ提案日_text", "タイヤ提案コメント", "接客指示"]
             dl_cols_exist = [c for c in dl_cols if c in df_today.columns]
 
             btn_col1, btn_col2 = st.columns(2)
@@ -2004,12 +2192,13 @@ with tab0:
                         n_s_pdf  = (df_today.get("ランク", pd.Series()) == "S").sum()
                         n_ab_pdf = df_today.get("ランク", pd.Series()).isin(["A","B"]).sum()
                         n_urg_pdf = (df_today["車検残日数"].fillna(999) <= 90).sum() if "車検残日数" in df_today.columns else 0
+                        n_tire_pdf = pd.to_numeric(df_today.get("タイヤ交換提案対象フラグ", 0), errors="coerce").fillna(0).astype(int).sum()
 
                         summary_data = [
-                            ["来店件数", "Sランク", "A+Bランク", "車検90日以内"],
-                            [str(len(df_today)), str(n_s_pdf), str(n_ab_pdf), str(n_urg_pdf)],
+                            ["来店件数", "Sランク", "A+Bランク", "車検90日以内", "タイヤ提案対象"],
+                            [str(len(df_today)), str(n_s_pdf), str(n_ab_pdf), str(n_urg_pdf), str(n_tire_pdf)],
                         ]
-                        summary_tbl = Table(summary_data, colWidths=[43*mm]*4)
+                        summary_tbl = Table(summary_data, colWidths=[34*mm]*5)
                         summary_tbl.setStyle(TableStyle([
                             ("FONTNAME",    (0,0), (-1,-1), FONT),
                             ("FONTSIZE",    (0,0), (-1,0),  8),
@@ -2170,6 +2359,25 @@ with tab0:
                                                    textColor=colors.HexColor("#dc2626"), leading=11)
                                 ),
                             ]]
+                            # タイヤ提案アラート行（あれば）
+                            tire_alert_pdf = str(row.get("タイヤ交換提案アラート", "")).strip()
+                            tire_date_pdf = str(row.get("前回タイヤ提案日_text", "")).strip()
+                            tire_comment_pdf = str(row.get("タイヤ提案コメント", "")).strip()
+                            tire_data = []
+                            if int(pd.to_numeric(row.get("タイヤ交換提案対象フラグ",0), errors="coerce") or 0) == 1 and tire_alert_pdf:
+                                tire_parts = [f"[タイヤ] {tire_alert_pdf}"]
+                                if tire_date_pdf:
+                                    tire_parts.append(f"前回提案日：{tire_date_pdf}")
+                                if tire_comment_pdf:
+                                    tire_parts.append(f"コメント：{tire_comment_pdf[:60]}{'...' if len(tire_comment_pdf)>60 else ''}")
+                                tire_data = [[
+                                    Paragraph(
+                                        " / ".join(tire_parts),
+                                        ParagraphStyle("ta", fontName=FONT, fontSize=7.5,
+                                                       textColor=colors.HexColor("#9a3412"), leading=10)
+                                    ),
+                                ]]
+
                             # 備考行（あれば）
                             biko_data = []
                             if biko_pdf:
@@ -2188,8 +2396,12 @@ with tab0:
                                 ),
                             ]]
 
-                            all_rows = header_data + status_svc_data + svc_status_data + detail_data + biko_data + action_data
+                            all_rows = header_data + status_svc_data + svc_status_data + detail_data + tire_data + biko_data + action_data
                             n_rows = len(all_rows)
+                            base_idx = len(header_data) + len(status_svc_data) + len(svc_status_data) + len(detail_data)
+                            tire_row_idx = base_idx if tire_data else None
+                            biko_base = base_idx + len(tire_data)
+                            biko_row_idx = biko_base if biko_data else None
 
                             card = Table(
                                 all_rows,
@@ -2216,8 +2428,11 @@ with tab0:
                                 ("BOTTOMPADDING", (0,0), (-1,-1), 3),
                                 ("LEFTPADDING",   (0,0), (-1,-1), 4),
                             ]
-                            if biko_data:
-                                style_cmds.append(("SPAN", (0, n_rows-2), (-1, n_rows-2)))
+                            if tire_row_idx is not None:
+                                style_cmds.append(("BACKGROUND", (0, tire_row_idx), (-1, tire_row_idx), colors.HexColor("#fff7ed")))
+                                style_cmds.append(("SPAN", (0, tire_row_idx), (-1, tire_row_idx)))
+                            if biko_row_idx is not None:
+                                style_cmds.append(("SPAN", (0, biko_row_idx), (-1, biko_row_idx)))
                             card.setStyle(TableStyle(style_cmds))
                             story.append(KeepTogether([card, Spacer(1, 2*mm)]))
 
