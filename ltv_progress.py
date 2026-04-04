@@ -628,7 +628,7 @@ SHAKEN_KEYWORDS = [
 def scan_data_dir():
     """dataフォルダをスキャンしてCSVファイルを分類する"""
     if not DATA_DIR.exists():
-        return None, [], None, None
+        return None, [], None, None, None
 
     all_csvs = list(DATA_DIR.glob("*.csv")) + list(DATA_DIR.glob("*.CSV"))
 
