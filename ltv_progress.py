@@ -1076,7 +1076,9 @@ elif auto_txn_paths:
 else:
     # Googleドライブからすべての取引CSVを読み込む
     for fname, fid in GDRIVE_IDS_LTV.items():
-        if fname in ("Master_Data.csv", "Reservation.csv", "保険.csv") or not fid:
+        if fname in ("Master_Data.csv", "Reservation.csv", "保険.csv",
+                     "staff_master.csv", "タイヤ提案履歴.csv", "tire_alert.csv",
+                     "tire_proposal_history.csv", "仮予約.csv", "仮予約データ.csv") or not fid:
             continue
         _txn_sources.append(("gdrive", (fname, fid)))
 
@@ -1969,7 +1971,8 @@ with tab0:
                         for si, sm in enumerate(svc_marks):
                             [sc1, sc2, sc3][si % 3].markdown(sm)
                     st.markdown(f"**未取引サービス：** {row.get('未取引サービス','─')}")
-                    if int(pd.to_numeric(row.get('タイヤ交換提案対象フラグ',0), errors='coerce') or 0) == 1:
+                    _tf = pd.to_numeric(row.get('タイヤ交換提案対象フラグ',0), errors='coerce')
+                    if (0 if pd.isna(_tf) else int(_tf)) == 1:
                         st.markdown(f"**タイヤ提案アラート：** {row.get('タイヤ交換提案アラート','')} / 前回提案日：{row.get('前回タイヤ提案日_text','─')}")
                         if str(row.get('タイヤ提案コメント','')).strip():
                             st.markdown(f"**タイヤ提案コメント：** {row.get('タイヤ提案コメント','')}")
@@ -2364,7 +2367,8 @@ with tab0:
                             tire_date_pdf = str(row.get("前回タイヤ提案日_text", "")).strip()
                             tire_comment_pdf = str(row.get("タイヤ提案コメント", "")).strip()
                             tire_data = []
-                            if int(pd.to_numeric(row.get("タイヤ交換提案対象フラグ",0), errors="coerce") or 0) == 1 and tire_alert_pdf:
+                            _tf2 = pd.to_numeric(row.get("タイヤ交換提案対象フラグ",0), errors="coerce")
+                            if (0 if pd.isna(_tf2) else int(_tf2)) == 1 and tire_alert_pdf:
                                 tire_parts = [f"[タイヤ] {tire_alert_pdf}"]
                                 if tire_date_pdf:
                                     tire_parts.append(f"前回提案日：{tire_date_pdf}")
