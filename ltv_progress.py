@@ -549,11 +549,22 @@ def save_activity_log(log: dict) -> bool:
         st.warning(f"ログ保存エラー: {e}")
         return False
 
+def _is_valid_id(v: str) -> bool:
+    """IDとして有効な値か判定（nan/空/None等を除外）"""
+    if not v:
+        return False
+    s = str(v).strip().lower()
+    return s not in ("", "nan", "none", "nat", "─", "-")
+
+
 def get_latest_log(cust_id: str, veh_id: str) -> dict:
-    """顧客IDと車両IDで最新の活動ログを取得"""
+    """顧客IDと車両IDで最新の活動ログを取得（nan/空IDの場合は空を返す）"""
+    if not _is_valid_id(cust_id) or not _is_valid_id(veh_id):
+        return {}
     logs = load_activity_logs()
     matched = [l for l in logs
-               if l.get("顧客ID")==str(cust_id) and l.get("車両ID")==str(veh_id)]
+               if _is_valid_id(l.get("顧客ID","")) and _is_valid_id(l.get("車両ID",""))
+               and l.get("顧客ID")==str(cust_id) and l.get("車両ID")==str(veh_id)]
     if matched:
         return sorted(matched, key=lambda x: x.get("記録日",""), reverse=True)[0]
     return {}
@@ -1921,7 +1932,7 @@ with tab0:
                 # ── 前回提案履歴の表示 ──
                 cust_id_str = str(row.get("顧客ID", ""))
                 veh_id_str  = str(row.get("車両ID", ""))
-                prev_log = get_latest_log(cust_id_str, veh_id_str) if cust_id_str else {}
+                prev_log = get_latest_log(cust_id_str, veh_id_str)
                 if prev_log:
                     prev_phase = prev_log.get("フェーズ", "")
                     prev_item  = prev_log.get("提案項目", "")
@@ -1994,7 +2005,9 @@ with tab0:
                         staff_list_card = load_staff_master()
                         shaken_status_now = str(row.get("車検予約状況_最新", "予約なし"))
                         reg_no_display = str(row.get("登録番号", "")).strip()
-                        is_incomplete = len(reg_no_display.replace(" ","").replace("─","")) < 6
+                        # nan/空/短すぎは不完全とみなす
+                        _reg_clean = reg_no_display.replace(" ","").replace("　","").replace("─","")
+                        is_incomplete = (not _is_valid_id(_reg_clean)) or len(_reg_clean) < 6
 
                         # st.formで囲む → 保存ボタンを押すまで一切再描画しない
                         with st.form(key=f"form_{act_key}"):
@@ -2066,44 +2079,49 @@ with tab0:
                             today_log_date = datetime.today().strftime("%Y-%m-%d")
                             reg_no_raw = str(row.get("登録番号", ""))
                             reg_no_save = normalize_plate(full_plate_input) if full_plate_input.strip() else normalize_plate(reg_no_raw)
-                            shaken_expiry = str(row.get("車検満了日", ""))
-                            saved_count = 0
-                            base_log = {
-                                "記録日"   : today_log_date,
-                                "顧客ID"   : cust_id_str,
-                                "車両ID"   : veh_id_str,
-                                "登録番号" : reg_no_save,
-                                "担当者"   : staff_sel,
-                                "店舗"     : str(row.get("入庫店舗ID", "")),
-                                "ランク"   : str(row.get("ランク", "")),
-                            }
-                            # 車検ログ
-                            if shaken_status_now not in ["車検予約済"]:
-                                ok = save_activity_log({**base_log,
-                                    "log_id"   : str(uuid.uuid4())[:8],
-                                    "提案項目" : "車検",
-                                    "フェーズ" : shaken_phase_sel,
-                                    "車検満了日": shaken_expiry,
-                                    "備考"     : memo_input,
-                                })
-                                if ok: saved_count += 1
-                            # サービス別ログ
-                            for svc, phase in svc_phases.items():
-                                if phase != "─ 未記録":
+
+                            # 登録番号バリデーション：nanや空のまま保存させない
+                            if not _is_valid_id(reg_no_save) or len(reg_no_save) < 6:
+                                st.error("❌ 登録番号が未入力または不完全です。フルナンバーを入力してから保存してください。")
+                            else:
+                                shaken_expiry = str(row.get("車検満了日", ""))
+                                saved_count = 0
+                                base_log = {
+                                    "記録日"   : today_log_date,
+                                    "顧客ID"   : cust_id_str,
+                                    "車両ID"   : veh_id_str,
+                                    "登録番号" : reg_no_save,
+                                    "担当者"   : staff_sel,
+                                    "店舗"     : str(row.get("入庫店舗ID", "")),
+                                    "ランク"   : str(row.get("ランク", "")),
+                                }
+                                # 車検ログ
+                                if shaken_status_now not in ["車検予約済"]:
                                     ok = save_activity_log({**base_log,
                                         "log_id"   : str(uuid.uuid4())[:8],
-                                        "提案項目" : svc,
-                                        "フェーズ" : phase,
-                                        "車検満了日": "",
+                                        "提案項目" : "車検",
+                                        "フェーズ" : shaken_phase_sel,
+                                        "車検満了日": shaken_expiry,
                                         "備考"     : memo_input,
                                     })
                                     if ok: saved_count += 1
+                                # サービス別ログ
+                                for svc, phase in svc_phases.items():
+                                    if phase != "─ 未記録":
+                                        ok = save_activity_log({**base_log,
+                                            "log_id"   : str(uuid.uuid4())[:8],
+                                            "提案項目" : svc,
+                                            "フェーズ" : phase,
+                                            "車検満了日": "",
+                                            "備考"     : memo_input,
+                                        })
+                                        if ok: saved_count += 1
 
-                            if saved_count > 0:
-                                st.session_state[saved_key] = {**base_log, "件数": saved_count}
-                                st.success(f"✅ {saved_count}件をNotionに保存しました")
-                            else:
-                                st.error("保存に失敗しました。Notion接続を確認してください。")
+                                if saved_count > 0:
+                                    st.session_state[saved_key] = {**base_log, "件数": saved_count}
+                                    st.success(f"✅ {saved_count}件をNotionに保存しました")
+                                else:
+                                    st.error("保存に失敗しました。Notion接続を確認してください。")
 
             # ── CSV ダウンロード ──
             st.markdown("")
@@ -2382,6 +2400,27 @@ with tab0:
                                     ),
                                 ]]
 
+                            # 前回提案履歴行（あれば）
+                            prev_log_data = []
+                            pdf_cust_id = str(row.get("顧客ID", ""))
+                            pdf_veh_id = str(row.get("車両ID", ""))
+                            pdf_prev_log = get_latest_log(pdf_cust_id, pdf_veh_id)
+                            if pdf_prev_log:
+                                pl_date  = pdf_prev_log.get("記録日", "")
+                                pl_staff = pdf_prev_log.get("担当者", "")
+                                pl_item  = pdf_prev_log.get("提案項目", "")
+                                pl_phase = pdf_prev_log.get("フェーズ", "")
+                                is_fu = "興味あり" in pl_phase or "仮予約" in pl_phase
+                                fu_mark = " >> 要フォロー" if is_fu else ""
+                                prev_log_data = [[
+                                    Paragraph(
+                                        f"[前回提案] {pl_date} 担当:{pl_staff} / {pl_item} -> {pl_phase}{fu_mark}",
+                                        ParagraphStyle("pl", fontName=FONT, fontSize=7.5,
+                                                       textColor=colors.HexColor("#854d0e") if is_fu else colors.HexColor("#065f46"),
+                                                       leading=10)
+                                    ),
+                                ]]
+
                             # 備考行（あれば）
                             biko_data = []
                             if biko_pdf:
@@ -2400,11 +2439,13 @@ with tab0:
                                 ),
                             ]]
 
-                            all_rows = header_data + status_svc_data + svc_status_data + detail_data + tire_data + biko_data + action_data
+                            all_rows = header_data + status_svc_data + svc_status_data + detail_data + tire_data + prev_log_data + biko_data + action_data
                             n_rows = len(all_rows)
                             base_idx = len(header_data) + len(status_svc_data) + len(svc_status_data) + len(detail_data)
                             tire_row_idx = base_idx if tire_data else None
-                            biko_base = base_idx + len(tire_data)
+                            prev_log_base = base_idx + len(tire_data)
+                            prev_log_row_idx = prev_log_base if prev_log_data else None
+                            biko_base = prev_log_base + len(prev_log_data)
                             biko_row_idx = biko_base if biko_data else None
 
                             card = Table(
@@ -2435,6 +2476,10 @@ with tab0:
                             if tire_row_idx is not None:
                                 style_cmds.append(("BACKGROUND", (0, tire_row_idx), (-1, tire_row_idx), colors.HexColor("#fff7ed")))
                                 style_cmds.append(("SPAN", (0, tire_row_idx), (-1, tire_row_idx)))
+                            if prev_log_row_idx is not None:
+                                _pl_bg = colors.HexColor("#fef3c7") if prev_log_data and any("要フォロー" in str(c) for r in prev_log_data for c in r) else colors.HexColor("#f0fdf4")
+                                style_cmds.append(("BACKGROUND", (0, prev_log_row_idx), (-1, prev_log_row_idx), _pl_bg))
+                                style_cmds.append(("SPAN", (0, prev_log_row_idx), (-1, prev_log_row_idx)))
                             if biko_row_idx is not None:
                                 style_cmds.append(("SPAN", (0, biko_row_idx), (-1, biko_row_idx)))
                             card.setStyle(TableStyle(style_cmds))
